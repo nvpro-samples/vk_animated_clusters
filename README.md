@@ -46,7 +46,7 @@ When no custom glTF 2.0 file is loaded (via commandline or _"File>Open"_), the d
   * You can change the two different effects. Twisting is used to mimic larger deformations, like in skeletal animation, whilst ripple is used for smaller changes. You can also influence how often the traditional ray tracer would do rebuilds rather than just refits. On high twist angles you will see a higher render time loss if only doing refits. 
   * The _"Ray tracer specifics"_ settings allow to change the BLAS and TLAS build flags. Note that the sample was mostly meant to showcase faster builds for animated content, therefore no compaction is performed and `VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR` is always set for traditional triangle BLAS.
 * Play with the _"Clusters & CLAS"_ properties
-  * _"Cluster/meshlet size"_: We found that 64 triangles 64 vertices works quite well. Larger clusters save more memory and speed up animation updates, but they can negatively impact render time (and espcially mesh-shaders would be sensitive to them). We use a new open-source library for clusterization [TODO](TODO) as well as [meshoptimizer](https://github.com/zeux/meshoptimizer) for optimizations.
+  * _"Cluster/meshlet size"_: We found that 64 triangles 64 vertices works quite well. Larger clusters save more memory and speed up animation updates, but they can negatively impact render time (and espcially mesh-shaders would be sensitive to them). We use a new open-source library for clusterization [nv_cluster_builder](https://github.com/nvpro-samples/nv_cluster_builder) as well as [meshoptimizer](https://github.com/zeux/meshoptimizer) for optimizations.
   * _"Use templates"_: If set we build one set of cluster templates for the original model once, and then use it to instantiate the clusters for each animated instance quicker. Otherwise the CLAS are built directly from index and vertex data.  
   * _"Template / CLAS build / instantiate mode"_: These flags influence creation time of templates or CLAS, the ray tracing time of CLAS, as well as the overall memory consumption.
   * _"Template bbox bloat percentage"_: While templates do not store positions, position and bounding box information can help decrease memory and speed instantiation up a bit. This factor adds a percentage of the object's bounding box to the individual bounding box of a cluster, to account for later animation changes. Setting it too low will result in artifacts.
@@ -262,7 +262,7 @@ You can use the commandline to change some defaults:
 
 ## Building and Running
 
-The new `VK_NV_cluster_acceleration_structure` extension requires new drivers, earliest release on 1/30/2025.
+The new `VK_NV_cluster_acceleration_structure` extension requires newer drivers, earliest release version is `572.16` from 1/30/2025.
 The sample should run on older drivers with just rasterization available.
 
 Point cmake to the `vk_animated_clusters` directory and for example set the output directory to `/build`.
@@ -276,7 +276,6 @@ Note, that the repository of `nvpro_core` needs to be updated manually in case t
 The Vulkan validation layers may interfere with extensions it doesn't know about, therefore it is currently disabled in debug builds.
 This will be changed with future Vulkan SDKs.
 
-
 ## Further Samples about NVIDIA RTX Mega Geometry
 
 Other Vulkan samples using the new extensions are:
@@ -286,3 +285,6 @@ Other Vulkan samples using the new extensions are:
 
 We also recommend having a look at [NVIDIA GameWorks RTX Mega Geometry (coming soon)](https://github.com/NVIDIAGameWorks/RTX-Megageometry), which demonstrates tessellation of subdivision surfaces in DirectX 12.
 
+## Third Party
+
+[meshoptimizer](https://github.com/zeux/meshoptimizer) can be used for as alternative for clusterization, and is always used when the triangles within a cluster are re-ordered to improve triangle strips.
