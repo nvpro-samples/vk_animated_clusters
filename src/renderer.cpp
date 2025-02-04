@@ -278,6 +278,8 @@ void Renderer::deinitBasics(Resources& res)
 
 void Renderer::updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
 {
+  assert(m_config.doAnimation);
+
   auto timerSection = profiler.timeRecurring("Animation", cmd);
 
   shaderio::AnimationConstants constants;
@@ -304,7 +306,7 @@ void Renderer::updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene
 
     constants.geometrySize = glm::length(sceneGeometry.bbox.hi - sceneGeometry.bbox.lo);
 
-    if(frame.doAnimation)
+    if(m_config.doAnimation)
     {
       m_animDispatcher.dispatchThreads(cmd, m_renderInstances[i].numVertices, &constants, nvvk::DispatcherBarrier::eNone,
                                        nvvk::DispatcherBarrier::eNone, ANIMATION_WORKGROUP_SIZE, 0);
@@ -324,18 +326,11 @@ void Renderer::updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene
   {
     constants.instanceIndex = uint32_t(i);
     // first dispatch needs barrier
-    uint32_t preBarrier = i == 0 ? (frame.doAnimation ? nvvk::DispatcherBarrier::eCompute : nvvk::DispatcherBarrier::eTransfer) :
+    uint32_t preBarrier = i == 0 ? (m_config.doAnimation ? nvvk::DispatcherBarrier::eCompute : nvvk::DispatcherBarrier::eTransfer) :
                                    nvvk::DispatcherBarrier::eNone;
     m_animDispatcher.dispatchThreads(cmd, m_renderInstances[i].numTriangles, &constants, nvvk::DispatcherBarrier::eNone,
                                      preBarrier, ANIMATION_WORKGROUP_SIZE, 1);
   }
-
-  m_lastAnimation = frame.doAnimation;
-}
-
-bool Renderer::needAnimationUpdate(const FrameConfig& frame)
-{
-  return frame.doAnimation || (m_lastAnimation != frame.doAnimation);
 }
 
 void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererConfig& config, const VkAccelerationStructureKHR* blas)

@@ -420,7 +420,7 @@ AnimatedClusters::ChangeStates AnimatedClusters::handleChanges(uint32_t width, u
 
   bool rendererChanged = false;
   if(sceneChanged || shaderChanged || tweakChanged(m_tweak.renderer) || tweakChanged(m_tweak.gridCopies)
-     || tweakChanged(m_tweak.gridConfig)
+     || tweakChanged(m_tweak.gridConfig) || rendererCfgChanged(m_rendererConfig.doAnimation)
      || (m_tweak.renderer == RENDERER_RAYTRACE_CLUSTERS
          && (tweakChanged(m_tweak.clusterPositionTruncationBits) || tweakChanged(m_tweak.templateBboxBloat)
              || tweakChanged(m_tweak.templateBuildMode) || tweakChanged(m_tweak.clusterBuildMode)
@@ -477,12 +477,12 @@ void AnimatedClusters::renderFrame(VkCommandBuffer cmd, uint32_t width, uint32_t
     frameConstants.visFilterInstanceID = ~0;
 
     frameConstants.facetShading = m_tweak.facetShading ? 1 : 0;
-    frameConstants.doAnimation  = m_frameConfig.doAnimation ? 1 : 0;
+    frameConstants.doAnimation  = m_rendererConfig.doAnimation ? 1 : 0;
 
     m_frameConfig.hbaoActive =
         m_tweak.hbaoActive && (m_tweak.renderer == RENDERER_RASTER_CLUSTERS || m_tweak.renderer == RENDERER_RASTER_TRIANGLES);
 
-    if(m_frameConfig.doAnimation)
+    if(m_rendererConfig.doAnimation)
     {
       if(m_tweak.overrideTime)
       {
@@ -648,6 +648,7 @@ void AnimatedClusters::setupConfigParameters(nvh::ParameterList& parameterList)
 
   parameterList.add("renderer", (uint32_t*)&m_tweak.renderer);
   parameterList.add("supersample", &m_tweak.supersample);
+  parameterList.add("animation", &m_rendererConfig.doAnimation);
   parameterList.add("templates", &m_tweak.useTemplates);
   parameterList.add("implicittemplates", &m_tweak.useImplicitTemplates);
   parameterList.add("gridcopies", &m_tweak.gridCopies);

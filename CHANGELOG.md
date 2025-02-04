@@ -1,0 +1,2 @@
+* 2/04/2025: `doAnimation` is moved to renderer config. This allows a newly added codepath for the triangle ray tracer to use BLAS compaction when animation is off. It enables more comparisons between ray traced triangles and clusters.
+* 1/30/2025: Initial Release

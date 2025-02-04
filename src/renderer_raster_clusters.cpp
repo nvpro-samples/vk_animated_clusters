@@ -78,6 +78,8 @@ bool RendererRasterClusters::initShaders(Resources& res, Scene& scene, const Ren
 
 bool RendererRasterClusters::init(Resources& res, Scene& scene, const RendererConfig& config)
 {
+  m_config = config;
+
   if(!initShaders(res, scene, config))
     return false;
 
@@ -123,7 +125,7 @@ bool RendererRasterClusters::init(Resources& res, Scene& scene, const RendererCo
 
 void RendererRasterClusters::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
 {
-  if(needAnimationUpdate(frame))
+  if(m_config.doAnimation)
   {
     updateAnimation(primary, res, scene, frame, profiler);
   }

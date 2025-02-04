@@ -57,6 +57,8 @@ bool RendererRasterTriangles::initShaders(Resources& res, Scene& scene, const Re
 
 bool RendererRasterTriangles::init(Resources& res, Scene& scene, const RendererConfig& config)
 {
+  m_config = config;
+
   if(!initShaders(res, scene, config))
     return false;
 
@@ -96,7 +98,7 @@ bool RendererRasterTriangles::init(Resources& res, Scene& scene, const RendererC
 
 void RendererRasterTriangles::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
 {
-  if(needAnimationUpdate(frame))
+  if(m_config.doAnimation)
   {
     updateAnimation(primary, res, scene, frame, profiler);
   }

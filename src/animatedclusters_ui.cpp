@@ -228,9 +228,9 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
   if(ImGui::CollapsingHeader("Animation", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
     PE::begin("##Animation");
-    PE::Checkbox("Enable animation", &m_frameConfig.doAnimation);
+    PE::Checkbox("Enable animation", &m_rendererConfig.doAnimation);
 
-    ImGui::BeginDisabled(!m_frameConfig.doAnimation);
+    ImGui::BeginDisabled(!m_rendererConfig.doAnimation);
     PE::SliderFloat("Override time value", &m_tweak.overrideTime, 0, 10.0f, "%0.3f", 0, "Set to 0 disables override");
 
     bool ripple = m_frameConfig.frameConstants.animationRippleEnabled != 0;
@@ -255,7 +255,7 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
 
     PE::begin("##AnimationRTSpecifics");
 
-    ImGui::BeginDisabled(!m_frameConfig.doAnimation
+    ImGui::BeginDisabled(!m_rendererConfig.doAnimation
                          || (m_tweak.renderer != RENDERER_RAYTRACE_TRIANGLES && m_tweak.renderer != RENDERER_RAYTRACE_CLUSTERS));
 
     TLASUpdateMode updateMode = m_frameConfig.forceTlasFullRebuild ? TLAS_UPDATE_REBUILD : TLAS_UPDATE_REFIT;
@@ -264,7 +264,7 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
 
     ImGui::EndDisabled();
 
-    ImGui::BeginDisabled(!m_frameConfig.doAnimation || m_tweak.renderer != RENDERER_RAYTRACE_TRIANGLES);
+    ImGui::BeginDisabled(!m_rendererConfig.doAnimation || m_tweak.renderer != RENDERER_RAYTRACE_TRIANGLES);
     PE::SliderFloat("BLAS rebuild ratio", &m_frameConfig.blasRebuildFraction, 0.f, 1.f);
     PE::Text("BLAS rebuilds per frame", "%d", int32_t(m_frameConfig.blasRebuildFraction * m_tweak.gridCopies));
     m_frameConfig.blasRebuildFraction = int32_t(m_frameConfig.blasRebuildFraction * m_tweak.gridCopies) / float(m_tweak.gridCopies);
@@ -309,9 +309,6 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
 
     if(ImGui::BeginTable("Memory stats", 3, ImGuiTableFlags_RowBg))
     {
-      uint64_t blasSize = m_tweak.renderer == RENDERER_RAYTRACE_CLUSTERS ? readback.blasesSize : resourceInfo.rtBlasMemBytes;
-
-
       ImGui::TableSetupColumn("Memory", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("Actual", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("Reserved", ImGuiTableColumnFlags_WidthStretch);
@@ -327,7 +324,7 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
       ImGui::TableNextColumn();
       ImGui::Text("BLAS");
       ImGui::TableNextColumn();
-      ImGui::Text("%s", formatMemorySize(blasSize).c_str());
+      ImGui::Text("%s", formatMemorySize(readback.blasesSize).c_str());
       ImGui::TableNextColumn();
       ImGui::Text("%s", formatMemorySize(resourceInfo.rtBlasMemBytes).c_str());
       ImGui::TableNextRow();
@@ -355,7 +352,7 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
       ImGui::TableNextColumn();
       ImGui::Text("Total");
       ImGui::TableNextColumn();
-      ImGui::Text("%s", formatMemorySize(resourceInfo.rtTlasMemBytes + blasSize + readback.clustersSize
+      ImGui::Text("%s", formatMemorySize(resourceInfo.rtTlasMemBytes + readback.blasesSize + readback.clustersSize
                                          + resourceInfo.rtOtherMemBytes + resourceInfo.sceneMemBytes)
                             .c_str());
       ImGui::TableNextColumn();

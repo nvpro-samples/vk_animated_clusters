@@ -46,7 +46,6 @@ struct FrameConfig
   uint32_t                 winWidth;
   uint32_t                 winHeight;
   bool                     hbaoActive       = true;
-  bool                     doAnimation      = true;
   bool                     drawClusterBoxes = false;
   bool                     drawObjects      = true;
   uint32_t                 rebuildNth;

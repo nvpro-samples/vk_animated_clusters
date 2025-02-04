@@ -59,8 +59,6 @@ private:
 
   void initRayTracingPipeline(Resources& res);
 
-  RendererConfig m_config;
-
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
   nvvk::SBTWrapper          m_rtSbt;   // Shading binding table wrapper
   nvvkhl::PipelineContainer m_rtPipe;  // Hold pipelines and layout
@@ -84,7 +82,7 @@ private:
   uint32_t m_numTotalClusters = 0;
 
   VkClusterAccelerationStructureTriangleClusterInputNV     m_clusterTriangleInput;
-  VkClusterAccelerationStructureClustersBottomLevelInputNV m_custerBlasInput;
+  VkClusterAccelerationStructureClustersBottomLevelInputNV m_clusterBlasInput;
 
   struct GeometryTemplate
   {
@@ -193,7 +191,7 @@ bool RendererRayTraceClusters::init(Resources& res, Scene& scene, const Renderer
 
 void RendererRayTraceClusters::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
 {
-  if(needAnimationUpdate(frame))
+  if(m_config.doAnimation)
   {
     updateAnimation(primary, res, scene, frame, profiler);
     {
@@ -372,7 +370,7 @@ void RendererRayTraceClusters::updateRayTracingBlas(VkCommandBuffer cmd, Resourc
   inputs.maxAccelerationStructureCount = uint32_t(m_renderInstances.size());
   inputs.opMode                        = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
   inputs.opType                        = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_CLUSTERS_BOTTOM_LEVEL_NV;
-  inputs.opInput.pClustersBottomLevel  = &m_custerBlasInput;
+  inputs.opInput.pClustersBottomLevel  = &m_clusterBlasInput;
   inputs.flags                         = m_config.clusterBlasFlags;
 
   // we feed the generated blas addresses directly into the ray instances
@@ -1111,15 +1109,15 @@ bool RendererRayTraceClusters::initRayTracingBlas(Resources& res, Scene& scene, 
   {
     uint32_t numInstances = (uint32_t)blasInfos.size();
 
-    m_custerBlasInput = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_CLUSTERS_BOTTOM_LEVEL_INPUT_NV};
-    m_custerBlasInput.maxClusterCountPerAccelerationStructure = scene.m_maxPerGeometryClusters;
-    m_custerBlasInput.maxTotalClusterCount                    = m_numTotalClusters;
+    m_clusterBlasInput = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_CLUSTERS_BOTTOM_LEVEL_INPUT_NV};
+    m_clusterBlasInput.maxClusterCountPerAccelerationStructure = scene.m_maxPerGeometryClusters;
+    m_clusterBlasInput.maxTotalClusterCount                    = m_numTotalClusters;
 
     VkClusterAccelerationStructureInputInfoNV inputs = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
     inputs.maxAccelerationStructureCount             = numInstances;
     inputs.opMode                       = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
     inputs.opType                       = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_CLUSTERS_BOTTOM_LEVEL_NV;
-    inputs.opInput.pClustersBottomLevel = &m_custerBlasInput;
+    inputs.opInput.pClustersBottomLevel = &m_clusterBlasInput;
     inputs.flags                        = config.clusterBlasFlags;
 
     VkAccelerationStructureBuildSizesInfoKHR sizesInfo = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};

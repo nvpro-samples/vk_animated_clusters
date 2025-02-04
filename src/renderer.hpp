@@ -34,6 +34,8 @@ struct RendererConfig
   uint32_t  gridConfig     = 3;
   glm::vec3 refShift       = glm::vec3(1, 1, 1);
 
+  bool doAnimation = true;
+
   // rt related
   VkBuildAccelerationStructureFlagsKHR triangleBuildFlags = 0;
 
@@ -77,10 +79,10 @@ protected:
 
   void updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler);
 
-  bool needAnimationUpdate(const FrameConfig& frame);
-
   void initRayTracingTlas(Resources& res, Scene& scene, const RendererConfig& config, const VkAccelerationStructureKHR* blas = nullptr);
   void updateRayTracingTlas(VkCommandBuffer cmd, Resources& res, Scene& scene, bool update = false);
+
+  RendererConfig m_config;
 
   struct BasicShaders
   {
@@ -107,8 +109,6 @@ protected:
   nvvk::AccelKHR                              m_tlas;
 
   ResourceUsageInfo m_resourceUsageInfo{};
-
-  bool m_lastAnimation = false;
 };
 
 std::unique_ptr<Renderer> makeRendererRasterTriangles();
