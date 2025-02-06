@@ -654,6 +654,8 @@ void AnimatedClusters::setupConfigParameters(nvh::ParameterList& parameterList)
   parameterList.add("gridcopies", &m_tweak.gridCopies);
   parameterList.add("gridconfig", &m_tweak.gridConfig);
   parameterList.add("clusterconfig", (int*)&m_tweak.clusterConfig);
+  parameterList.add("nvcluster", &m_sceneConfig.clusterNvLibrary);
+  parameterList.add("nvclustergraph", &m_sceneConfig.clusterNvGraphWeight);
 
   parameterList.addFilename(".gltf", &m_modelFilename);
   parameterList.addFilename(".glb", &m_modelFilename);
