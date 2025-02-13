@@ -81,6 +81,10 @@ layout(location = 1) rayPayloadEXT RayPayload rayHitAO;
 
 #include "render_shading.glsl"
 
+#ifndef CLUSTER_DEDICATED_VERTICES
+#define CLUSTER_DEDICATED_VERTICES 0
+#endif
+
 /////////////////////////////////
 
 void main()
@@ -93,20 +97,64 @@ void main()
     visClusterID ^= 1 + gl_PrimitiveID;
   }
 
+  RenderInstance instance = instances[gl_InstanceID];
+
   // Fetch cluster header
-  Clusters_in clusterBuffer = Clusters_in(instances[gl_InstanceID].clusters);
+  Clusters_in clusterBuffer = Clusters_in(instance.clusters);
   Cluster     cluster       = clusterBuffer.d[clusterID];
 
   // Fetch triangle
+  // There is three different possibilities.
+#if CLUSTER_DEDICATED_VERTICES
+  // The data has been baked to have vertices per-cluster.
+  // This way we get away with the 8-bit triangle indices that are local to the cluster.
+
+  // the local triangle indices used within this cluster
+  uint8s_in localTriangles = uint8s_in(instance.clusterLocalTriangles);
+
+  uvec3 triangleIndices = uvec3(localTriangles.d[cluster.firstLocalTriangle + gl_PrimitiveID * 3 + 0],
+                                localTriangles.d[cluster.firstLocalTriangle + gl_PrimitiveID * 3 + 1],
+                                localTriangles.d[cluster.firstLocalTriangle + gl_PrimitiveID * 3 + 2]);
+
+  // convert to global indices for attribute lookup
+  triangleIndices += cluster.firstLocalVertex;
+
+#elif (!CLUSTER_DEDICATED_VERTICES) && 0
+  // Disable this for codepath for now, given we kept the original indexbuffer for computing the normals anyway,
+  // and disabling avoids the indirection. When the original triangle indexbuffer isn't needed
+  // then using this would be less memory.
+  
+  // the local triangle indices used within this cluster
+  uint8s_in localTriangles = uint8s_in(instance.clusterLocalTriangles);
+
+  uvec3 triangleIndices = uvec3(localTriangles.d[cluster.firstLocalTriangle + gl_PrimitiveID * 3 + 0],
+                                localTriangles.d[cluster.firstLocalTriangle + gl_PrimitiveID * 3 + 1],
+                                localTriangles.d[cluster.firstLocalTriangle + gl_PrimitiveID * 3 + 2]);
+
+  // convert to global indices for attribute lookup
+  
+  // we need another indirection, mapping the local triangle indices, to the global
+  // vertex indices within the cluster.
+  uints_in  localVertices  = uints_in(instance.clusterLocalVertices);
+  
+  triangleIndices.x = localVertices.d[cluster.firstLocalVertex + triangleIndices.x];
+  triangleIndices.y = localVertices.d[cluster.firstLocalVertex + triangleIndices.y];
+  triangleIndices.z = localVertices.d[cluster.firstLocalVertex + triangleIndices.z];
+
+#else
+  // The simple way is we just use the traditional triangle index buffer,
+  // which operates on global indices already.
+
   // get the classic triangle index buffer of this instance
-  uvec3s_in indexBuffer = uvec3s_in(instances[gl_InstanceID].triangles);
+  uvec3s_in indexBuffer = uvec3s_in(instance.triangles);
   // fetch triangle with cluster's offset
   // gl_PrimitiveID is the local triangle index within the cluster
   uvec3 triangleIndices = indexBuffer.d[gl_PrimitiveID + cluster.firstTriangle];
+#endif
 
   // Fetch vertex positions
   vec3     vertices[3];
-  vec3s_in vertexBuffer = vec3s_in(instances[gl_InstanceID].positions);
+  vec3s_in vertexBuffer = vec3s_in(instance.positions);
 
   [[unroll]]
   for(uint32_t i = 0; i < 3; i++)

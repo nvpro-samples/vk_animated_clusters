@@ -28,7 +28,8 @@ namespace animatedclusters {
 
 class RendererRayTraceTriangles : public Renderer
 {
-  static const VkDeviceSize MAX_BLAS_SCRATCH_BUFFER_SIZE = 2ull * 1024 * 1024 * 1024;
+private:
+  static constexpr VkDeviceSize MAX_BLAS_SCRATCH_BUFFER_SIZE = VkDeviceSize(2) * 1024 * 1024 * 1024;
 
 public:
   virtual bool init(Resources& res, Scene& scene, const RendererConfig& config) override;
@@ -104,6 +105,8 @@ bool RendererRayTraceTriangles::init(Resources& res, Scene& scene, const Rendere
     return false;
 
   initBasics(res, scene, config);
+
+  m_resourceUsageInfo.sceneMemBytes += scene.m_sceneTriangleMemBytes;
 
   VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &m_rtProperties};
   vkGetPhysicalDeviceProperties2(res.m_physical, &prop2);

@@ -64,6 +64,8 @@ bool RendererRasterTriangles::init(Resources& res, Scene& scene, const RendererC
 
   initBasics(res, scene, config);
 
+  m_resourceUsageInfo.sceneMemBytes += scene.m_sceneTriangleMemBytes;
+
   m_dsetContainer.init(res.m_device);
 
   VkShaderStageFlags stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;

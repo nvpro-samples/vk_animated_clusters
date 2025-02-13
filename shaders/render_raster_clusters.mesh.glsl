@@ -75,6 +75,10 @@ layout(location=0) out Interpolants {
 #define CLUSTER_TRIANGLE_COUNT 32
 #endif
 
+#ifndef CLUSTER_DEDICATED_VERTICES
+#define CLUSTER_DEDICATED_VERTICES 0
+#endif
+
 layout(local_size_x=MESHSHADER_WORKGROUP_SIZE) in;
 layout(max_vertices=CLUSTER_VERTEX_COUNT, max_primitives=CLUSTER_TRIANGLE_COUNT) out;
 layout(triangles) out;
@@ -101,8 +105,10 @@ void main()
   vec3s_in oPositions = vec3s_in(instance.positions);
   vec3s_in oNormals   = vec3s_in(instance.normals);
   
+#if !CLUSTER_DEDICATED_VERTICES
   // the global vertex indices used within this cluster
   uints_in  localVertices  = uints_in(instance.clusterLocalVertices);
+#endif
   // the local triangle indices used within this cluster
   uint8s_in localTriangles = uint8s_in(instance.clusterLocalTriangles);
   
@@ -124,9 +130,13 @@ void main()
     // space in the appropriate buffers so we can always do a load operation.
     uint vertLoad = min(vert, vertMax);
 
+#if CLUSTER_DEDICATED_VERTICES
+    uint vertexIndex = vertLoad + cluster.firstLocalVertex;
+#else
     // Convert the per-cluster vertex into the shared geometry wide vertex index.
     // This allows re-use of vertices across clusters.
     uint vertexIndex = localVertices.d[vertLoad + cluster.firstLocalVertex];
+#endif
 
     vec3 oPos = oPositions.d[vertexIndex];
     vec4 wPos = worldMatrix * vec4(oPos,1.0f);

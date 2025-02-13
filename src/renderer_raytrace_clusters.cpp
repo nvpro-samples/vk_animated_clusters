@@ -22,6 +22,7 @@
 #include <nvvk/images_vk.hpp>
 #include <nvvkhl/pipeline_container.hpp>
 #include <nvh/parallel_work.hpp>
+#include <nvh/misc.hpp>
 
 #include "renderer.hpp"
 #include "vk_nv_cluster_acc.h"
@@ -127,10 +128,12 @@ private:
 
 bool RendererRayTraceClusters::initShaders(Resources& res, Scene& scene, const RendererConfig& config)
 {
+  std::string prepend = nvh::stringFormat("#define CLUSTER_DEDICATED_VERTICES %d\n", scene.m_config.clusterDedicatedVertices);
+
   // do shaders first, most likely to contain errors
   m_shaders.rayGenShader = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_RAYGEN_BIT_KHR, "render_raytrace.rgen.glsl");
-  m_shaders.closestHitShader =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, "render_raytrace_clusters.rchit.glsl");
+  m_shaders.closestHitShader = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                                                                      "render_raytrace_clusters.rchit.glsl", prepend);
   m_shaders.missShader = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl",
                                                                 "#define RAYTRACING_PAYLOAD_INDEX 0\n");
   m_shaders.missShaderAO = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl",
@@ -153,6 +156,8 @@ bool RendererRayTraceClusters::init(Resources& res, Scene& scene, const Renderer
     return false;
 
   initBasics(res, scene, config);
+
+  m_resourceUsageInfo.sceneMemBytes += scene.m_sceneClusterMemBytes;
 
   VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &m_rtProperties};
   vkGetPhysicalDeviceProperties2(res.m_physical, &prop2);
@@ -617,12 +622,25 @@ void RendererRayTraceClusters::initRayTracingTemplates(Resources& res, Scene& sc
       templateInfo.triangleCount = cluster.numTriangles;
       templateInfo.baseGeometryIndexAndGeometryFlags.geometryFlags = VK_CLUSTER_ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT_NV;
 
-      templateInfo.indexBuffer = geometry.trianglesBuffer.address + (sizeof(uint32_t) * cluster.firstTriangle * 3);
-      templateInfo.indexBufferStride = sizeof(uint32_t);
-      templateInfo.indexType         = VK_CLUSTER_ACCELERATION_STRUCTURE_INDEX_FORMAT_32BIT_NV;
+      if(scene.m_config.clusterDedicatedVertices)
+      {
+        templateInfo.indexBuffer = geometry.clusterLocalTrianglesBuffer.address + (sizeof(uint8_t) * cluster.firstLocalTriangle);
+        templateInfo.indexBufferStride = sizeof(uint8_t);
+        templateInfo.indexType         = VK_CLUSTER_ACCELERATION_STRUCTURE_INDEX_FORMAT_8BIT_NV;
 
-      templateInfo.vertexBuffer             = geometry.positionsBuffer.address;
-      templateInfo.vertexBufferStride       = sizeof(glm::vec3);
+        templateInfo.vertexBuffer = geometry.positionsBuffer.address + (sizeof(glm::vec3) * cluster.firstLocalVertex);
+        templateInfo.vertexBufferStride = sizeof(glm::vec3);
+      }
+      else
+      {
+        templateInfo.indexBuffer = geometry.trianglesBuffer.address + (sizeof(uint32_t) * cluster.firstTriangle * 3);
+        templateInfo.indexBufferStride = sizeof(uint32_t);
+        templateInfo.indexType         = VK_CLUSTER_ACCELERATION_STRUCTURE_INDEX_FORMAT_32BIT_NV;
+
+        templateInfo.vertexBuffer       = geometry.positionsBuffer.address;
+        templateInfo.vertexBufferStride = sizeof(glm::vec3);
+      }
+
       templateInfo.positionTruncateBitCount = config.positionTruncateBits;
 
       templateInfo.instantiationBoundingBoxLimit =
@@ -899,10 +917,22 @@ void RendererRayTraceClusters::initRayTracingTemplateInstantiations(Resources& r
       // input
       VkClusterAccelerationStructureInstantiateClusterInfoNV& instInfo = instantiationInfos[clusterOffset + c];
 
-      instInfo.clusterIdOffset            = 0;  // stored in template
-      instInfo.clusterTemplateAddress     = geometryTemplate.templateAddresses[c];
-      instInfo.vertexBuffer.startAddress  = renderInstance.positions;  // we don't use per-cluster vertices
-      instInfo.vertexBuffer.strideInBytes = sizeof(glm::vec3);
+      instInfo.clusterIdOffset        = 0;  // stored in template
+      instInfo.clusterTemplateAddress = geometryTemplate.templateAddresses[c];
+
+      if(scene.m_config.clusterDedicatedVertices)
+      {
+        instInfo.vertexBuffer.startAddress  = renderInstance.positions + (sizeof(glm::vec3) * cluster.firstLocalVertex);
+        instInfo.vertexBuffer.strideInBytes = sizeof(glm::vec3);
+      }
+      else
+      {
+        // we don't use per-cluster vertices
+
+        instInfo.vertexBuffer.startAddress  = renderInstance.positions;
+        instInfo.vertexBuffer.strideInBytes = sizeof(glm::vec3);
+      }
+
 
       // destination
       uint32_t instOffset                 = geometryTemplate.instantionOffsets[c];
@@ -1037,12 +1067,25 @@ void RendererRayTraceClusters::initRayTracingClusters(Resources& res, Scene& sce
 
       buildInfo.baseGeometryIndexAndGeometryFlags.geometryFlags = VK_CLUSTER_ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT_NV;
 
-      buildInfo.indexBuffer       = geometry.trianglesBuffer.address + (sizeof(uint32_t) * cluster.firstTriangle * 3);
-      buildInfo.indexBufferStride = sizeof(uint32_t);
-      buildInfo.indexType         = VK_CLUSTER_ACCELERATION_STRUCTURE_INDEX_FORMAT_32BIT_NV;
+      if(scene.m_config.clusterDedicatedVertices)
+      {
+        buildInfo.indexBuffer = geometry.clusterLocalTrianglesBuffer.address + (sizeof(uint8_t) * cluster.firstLocalTriangle);
+        buildInfo.indexBufferStride = sizeof(uint8_t);
+        buildInfo.indexType         = VK_CLUSTER_ACCELERATION_STRUCTURE_INDEX_FORMAT_8BIT_NV;
 
-      buildInfo.vertexBuffer             = renderInstance.positions;  // we don't use per-cluster vertices
-      buildInfo.vertexBufferStride       = sizeof(glm::vec3);
+        buildInfo.vertexBuffer       = renderInstance.positions + (sizeof(glm::vec3) * cluster.firstLocalVertex);
+        buildInfo.vertexBufferStride = sizeof(glm::vec3);
+      }
+      else
+      {
+        buildInfo.indexBuffer       = geometry.trianglesBuffer.address + (sizeof(uint32_t) * cluster.firstTriangle * 3);
+        buildInfo.indexBufferStride = sizeof(uint32_t);
+        buildInfo.indexType         = VK_CLUSTER_ACCELERATION_STRUCTURE_INDEX_FORMAT_32BIT_NV;
+
+        buildInfo.vertexBuffer       = renderInstance.positions;
+        buildInfo.vertexBufferStride = sizeof(glm::vec3);
+      }
+
       buildInfo.positionTruncateBitCount = config.positionTruncateBits;
 
       if(useExplicit)

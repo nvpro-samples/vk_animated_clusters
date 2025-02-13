@@ -28,10 +28,16 @@ struct SceneConfig
 {
   uint32_t clusterVertices  = 64;
   uint32_t clusterTriangles = 64;
-  bool     clusterStripify  = true;
-  bool     clusterNvLibrary = true;
   // 0 disables
   float clusterNvGraphWeight = 0.0;
+  // Cost penalty for under-filling clusters
+  float clusterNvUnderfill = 1.0f;
+  // Cost penalty for overlapping bounding boxes
+  float clusterNvOverlap = 0.5f;
+
+  bool clusterDedicatedVertices = false;
+  bool clusterStripify          = true;
+  bool clusterNvLibrary         = true;
 };
 
 class Scene
@@ -88,7 +94,8 @@ public:
   std::vector<Geometry> m_geometries;
   std::vector<Camera>   m_cameras;
 
-  size_t                m_sceneMemBytes                 = 0;
+  size_t                m_sceneClusterMemBytes          = 0;
+  size_t                m_sceneTriangleMemBytes         = 0;
   uint32_t              m_maxPerGeometryClusters        = 0;
   uint32_t              m_maxPerGeometryTriangles       = 0;
   uint32_t              m_maxPerGeometryVertices        = 0;

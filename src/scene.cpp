@@ -98,7 +98,8 @@ void Scene::computeBBoxes()
 
 void Scene::upload(Resources& res)
 {
-  m_sceneMemBytes = 0;
+  m_sceneClusterMemBytes  = 0;
+  m_sceneTriangleMemBytes = 0;
 
   Resources::BatchedUploader uploader(res);
 
@@ -113,7 +114,8 @@ void Scene::upload(Resources& res)
 
       uploader.uploadBuffer(geom.positionsBuffer, geom.positions.data());
 
-      m_sceneMemBytes += geom.positionsBuffer.info.range;
+      m_sceneClusterMemBytes += geom.positionsBuffer.info.range;
+      m_sceneTriangleMemBytes += geom.positionsBuffer.info.range;
     }
     if(geom.triangles.size())
     {
@@ -122,7 +124,9 @@ void Scene::upload(Resources& res)
                                                   | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
       uploader.uploadBuffer(geom.trianglesBuffer, geom.triangles.data());
 
-      m_sceneMemBytes += geom.trianglesBuffer.info.range;
+      // animation still needs triangles for normals, even if clusters are used
+      m_sceneClusterMemBytes += geom.trianglesBuffer.info.range;
+      m_sceneTriangleMemBytes += geom.trianglesBuffer.info.range;
     }
     if(geom.clusters.size())
     {
@@ -131,7 +135,7 @@ void Scene::upload(Resources& res)
                                                  | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
       uploader.uploadBuffer(geom.clustersBuffer, geom.clusters.data());
 
-      m_sceneMemBytes += geom.clustersBuffer.info.range;
+      m_sceneClusterMemBytes += geom.clustersBuffer.info.range;
     }
     if(geom.clusterLocalTriangles.size())
     {
@@ -140,16 +144,16 @@ void Scene::upload(Resources& res)
                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
       uploader.uploadBuffer(geom.clusterLocalTrianglesBuffer, geom.clusterLocalTriangles.data());
 
-      m_sceneMemBytes += geom.clusterLocalTrianglesBuffer.info.range;
+      m_sceneClusterMemBytes += geom.clusterLocalTrianglesBuffer.info.range;
     }
-    if(geom.clusterLocalVertices.size())
+    if(geom.clusterLocalVertices.size() && !m_config.clusterDedicatedVertices)
     {
       geom.clusterLocalVerticesBuffer =
           res.createBuffer(sizeof(uint32_t) * geom.clusterLocalVertices.size(),
                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
       uploader.uploadBuffer(geom.clusterLocalVerticesBuffer, geom.clusterLocalVertices.data());
 
-      m_sceneMemBytes += geom.clusterLocalVerticesBuffer.info.range;
+      m_sceneClusterMemBytes += geom.clusterLocalVerticesBuffer.info.range;
     }
     if(geom.clusterBboxes.size())
     {
@@ -158,7 +162,7 @@ void Scene::upload(Resources& res)
                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
       uploader.uploadBuffer(geom.clusterBboxesBuffer, geom.clusterBboxes.data());
 
-      m_sceneMemBytes += geom.clusterBboxesBuffer.info.range;
+      m_sceneClusterMemBytes += geom.clusterBboxesBuffer.info.range;
     }
   }
 
@@ -370,6 +374,8 @@ bool Scene::buildClusters()
       }
 
       nvcluster::Input input;
+      input.config.costUnderfill  = m_config.clusterNvUnderfill;
+      input.config.costOverlap    = m_config.clusterNvOverlap;
       input.config.maxClusterSize = m_config.clusterTriangles;
       input.spatialElements       = &spatial;
       input.graph                 = m_config.clusterNvGraphWeight ? &graph : nullptr;
@@ -577,8 +583,32 @@ bool Scene::buildClusters()
         numTotalStrips += numStrips;
       }
 
+      if(m_config.clusterDedicatedVertices)
+      {
+        std::vector<glm::vec3> oldPositions = std::move(geom.positions);
+        geom.positions.resize(geom.clusterLocalVertices.size());
+        geom.numVertices = uint32_t(geom.positions.size());
+
+        nvh::parallel_ranges(
+            geom.numClusters,
+            [&](uint64_t idxBegin, uint64_t idxEnd, uint32_t threadIdx) {
+              for(uint64_t idx = idxBegin; idx < idxEnd; idx++)
+              {
+                shaderio::Cluster& cluster = geom.clusters[idx];
+
+                for(uint32_t v = 0; v < cluster.numVertices; v++)
+                {
+                  uint32_t newIndex                   = cluster.firstLocalVertex + v;
+                  uint32_t oldIndex                   = geom.clusterLocalVertices[newIndex];
+                  geom.positions[newIndex]            = oldPositions[oldIndex];
+                  geom.clusterLocalVertices[newIndex] = newIndex;
+                }
+              }
+            },
+            numThreads);
+      }
+
       // rebuild triangle buffer accounting for cluster order
-      // in the rare event that cluster building filtered out original triangles
       {
 
         uint32_t triOffset = 0;

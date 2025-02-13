@@ -58,6 +58,7 @@ bool RendererRasterClusters::initShaders(Resources& res, Scene& scene, const Ren
   std::string prepend;
   prepend += nvh::stringFormat("#define CLUSTER_VERTEX_COUNT %d\n", scene.m_config.clusterVertices);
   prepend += nvh::stringFormat("#define CLUSTER_TRIANGLE_COUNT %d\n", scene.m_config.clusterTriangles);
+  prepend += nvh::stringFormat("#define CLUSTER_DEDICATED_VERTICES %d\n", scene.m_config.clusterDedicatedVertices ? 1 : 0);
   prepend += nvh::stringFormat("#define MESHSHADER_WORKGROUP_SIZE %d\n", meshProps.maxPreferredMeshWorkGroupInvocations);
 
   m_shaders.meshShader =
@@ -84,6 +85,8 @@ bool RendererRasterClusters::init(Resources& res, Scene& scene, const RendererCo
     return false;
 
   initBasics(res, scene, config);
+
+  m_resourceUsageInfo.sceneMemBytes += scene.m_sceneClusterMemBytes;
 
   m_dsetContainer.init(res.m_device);
 

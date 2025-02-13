@@ -47,8 +47,7 @@ bool Renderer::initBasicShaders(Resources& res, Scene& scene, const RendererConf
 
 void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& config)
 {
-  m_resourceUsageInfo               = {};
-  m_resourceUsageInfo.sceneMemBytes = scene.m_sceneMemBytes;
+  m_resourceUsageInfo = {};
 
   m_animDispatcher.init(res.m_device);
   m_animDispatcher.setCode(res.m_shaderManager.get(m_basicShaders.animVertexShader), 0);
@@ -211,7 +210,7 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
     renderInstance.clusterBboxes         = geometry.clusterBboxesBuffer.address;
     renderInstance.originalPositions     = geometry.positionsBuffer.address;
 
-    // animated
+    // animated gets its own copy
     RenderInstanceBuffers& renderInstanceBuffers = m_renderInstanceBuffers[i];
     renderInstanceBuffers.positions =
         res.createBuffer(sizeof(glm::vec3) * geometry.numVertices,
@@ -230,6 +229,8 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
     region.srcOffset = 0;
     vkCmdCopyBuffer(cmd, geometry.positionsBuffer.buffer, renderInstanceBuffers.positions.buffer, 1, &region);
 
+    vkCmdFillBuffer(cmd, renderInstanceBuffers.normals.buffer, 0, renderInstanceBuffers.normals.info.range, 0);
+
     renderInstance.positions = renderInstanceBuffers.positions.address;
     renderInstance.normals   = renderInstanceBuffers.normals.address;
   }
@@ -244,7 +245,7 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
   {
     cmd = res.createTempCmdBuffer();
 
-    // update normals ocne
+    // update normals once
     shaderio::AnimationConstants constants;
     constants.animationState  = 0;
     constants.renderInstances = m_renderInstanceBuffer.address;

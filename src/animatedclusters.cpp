@@ -656,6 +656,9 @@ void AnimatedClusters::setupConfigParameters(nvh::ParameterList& parameterList)
   parameterList.add("clusterconfig", (int*)&m_tweak.clusterConfig);
   parameterList.add("nvcluster", &m_sceneConfig.clusterNvLibrary);
   parameterList.add("nvclustergraph", &m_sceneConfig.clusterNvGraphWeight);
+  parameterList.add("nvclusterunderfill", &m_sceneConfig.clusterNvUnderfill);
+  parameterList.add("nvclusteroverlap", &m_sceneConfig.clusterNvOverlap);
+  parameterList.add("clusterdedicatedvertices", &m_sceneConfig.clusterDedicatedVertices);
 
   parameterList.addFilename(".gltf", &m_modelFilename);
   parameterList.addFilename(".glb", &m_modelFilename);
