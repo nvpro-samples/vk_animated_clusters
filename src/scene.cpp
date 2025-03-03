@@ -493,17 +493,21 @@ bool Scene::buildClusters()
       std::vector<glm::uvec3> triangles = geom.triangles;
       meshopt_optimizeVertexCache((uint32_t*)geom.triangles.data(), (uint32_t*)triangles.data(), triangles.size() * 3, geom.numVertices);
 
-      // very conservative
-      std::vector<meshopt_Meshlet> meshlets(
-          meshopt_buildMeshletsBound(geom.numTriangles * 3, m_config.clusterVertices, m_config.clusterTriangles));
+      // we allow smaller clusters to be generated when that significantly improves their bounds
+      size_t minTriangles = (m_config.clusterTriangles / 4) & ~3;
+
+      std::vector<meshopt_Meshlet> meshlets(meshopt_buildMeshletsBound(geom.numTriangles * 3, m_config.clusterVertices, minTriangles));
       geom.clusterLocalTriangles.resize(meshlets.size() * m_config.clusterTriangles * 3);
       geom.clusterLocalVertices.resize(meshlets.size() * m_config.clusterVertices);
 
+      const float coneWeight = -1.f; // use axis aligned metrics
+      const float splitFactor = 2.f; // limit disconnected clusters
+
       size_t numClusters =
-          meshopt_buildMeshlets(meshlets.data(), geom.clusterLocalVertices.data(), geom.clusterLocalTriangles.data(),
-                                (uint32_t*)geom.triangles.data(), geom.triangles.size() * 3,
-                                (float*)geom.positions.data(), geom.numVertices, sizeof(glm::vec3),
-                                std::min(255u, m_config.clusterVertices), m_config.clusterTriangles, 0);
+          meshopt_buildMeshletsFlex(meshlets.data(), geom.clusterLocalVertices.data(), geom.clusterLocalTriangles.data(),
+                                    (uint32_t*)geom.triangles.data(), geom.triangles.size() * 3,
+                                    (float*)geom.positions.data(), geom.numVertices, sizeof(glm::vec3),
+                                    std::min(255u, m_config.clusterVertices), minTriangles, m_config.clusterTriangles, coneWeight, splitFactor);
 
       geom.numClusters = uint32_t(numClusters);
 
