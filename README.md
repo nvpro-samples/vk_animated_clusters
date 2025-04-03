@@ -232,7 +232,7 @@ We use the same TLAS building for both the traditional ray tracer and the cluste
 
 ### Ray Tracing with CLAS
 
-Build the ray tracing pipeline with `VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV::allowClusterAccelerationStructures` enabled.
+Build the ray tracing pipeline with `VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV::allowClusterAccelerationStructure` enabled.
 
 The ray tracing is generally the same as for regular TLAS/BLAS-based ray tracing. The main differences are:
 * `PrimitiveID` is now the primitive index within the CLAS
@@ -253,7 +253,7 @@ You can use the commandline to change some defaults:
 
 ## Limitations
 
-* The `ClusterID` can only be accessed in shaders using `gl_ClusterIDNV` after enabling `VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV::allowClusterAccelerationStructures` for that pipeline. We use `GL_EXT_spirv_intrinsics` rather than dedicated GLSL extension support that may come at a later time.
+* The `ClusterID` can only be accessed in shaders using `gl_ClusterIDNV` after enabling `VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV::allowClusterAccelerationStructure` for that pipeline. We use `GL_EXT_spirv_intrinsics` rather than dedicated GLSL extension support that may come at a later time.
 * Few error checks are performed on out of memory situations, which can happen on higher _"render copies"_ values, or the complexity of the loaded scene:
   * The cluster CLAS build is switching automatically to explicit mode, using one buffer per render-instance, to avoid exceeding 4GB limitations.
 * If the cluster library generates clusters > 256 vertices, scene loading will fail. This should be addressed in future versions.

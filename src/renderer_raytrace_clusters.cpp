@@ -1297,7 +1297,7 @@ void RendererRayTraceClusters::initRayTracingPipeline(Resources& res)
   // NEW for clusters! we need to enable their usage explicitly for a ray tracing pipeline
   VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV pipeClusters = {
       VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CLUSTER_ACCELERATION_STRUCTURE_CREATE_INFO_NV};
-  pipeClusters.allowClusterAccelerationStructures = true;
+  pipeClusters.allowClusterAccelerationStructure = true;
 
   // chain extension it into next of the pipeline create info
   pipelineInfo.pNext = &pipeClusters;
