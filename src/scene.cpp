@@ -204,8 +204,13 @@ bool Scene::buildClusters()
   uint64_t numTotalTriangles = 0;
   uint64_t numTotalStrips    = 0;
 
-  for(size_t g = 0; g < m_geometries.size(); g++)
-  {
+  bool     preferInnerParallelism = m_geometries.size() < numThreads * 2;
+  uint32_t numOuterThreads        = preferInnerParallelism ? 1 : numThreads;
+  uint32_t numInnerThreads        = preferInnerParallelism ? numThreads : 1;
+
+  bool fatalError = false;
+
+  auto fnProcessGeometry = [&](uint64_t g, uint32_t threadOuterIndex) {
     Geometry& geom = m_geometries[g];
 
     if(m_config.clusterNvLibrary)
@@ -249,7 +254,7 @@ bool Scene::buildClusters()
             reinterpret_cast<std::atomic_uint32_t&>(vertexTriangleRanges[triangleIndices.y].count)++;
             reinterpret_cast<std::atomic_uint32_t&>(vertexTriangleRanges[triangleIndices.z].count)++;
           },
-          numThreads);
+          numInnerThreads);
 
       // build graph
       if(m_config.clusterNvGraphWeight)
@@ -266,7 +271,7 @@ bool Scene::buildClusters()
                                                     + vertexTriangleRanges[triangleIndices.y].count
                                                     + vertexTriangleRanges[triangleIndices.z].count - 3;
             },
-            numThreads);
+            numInnerThreads);
 
         uint32_t offsetVertexTriangles = 0;
         for(uint32_t v = 0; v < geom.numVertices; v++)
@@ -307,7 +312,10 @@ bool Scene::buildClusters()
         // compute accurate triangle connections
         nvh::parallel_batches_indexed(
             geom.numTriangles,
-            [&](uint64_t t, uint32_t threadIdx) {
+            [&](uint64_t t, uint32_t threadInnerIdx) {
+              uint32_t threadIdx = preferInnerParallelism ? threadInnerIdx : threadOuterIndex;
+
+
               glm::uvec3        triangleIndices = geom.triangles[t];
               nvcluster::Range& triangleRange   = triangleConnectionRanges[t];
 
@@ -355,7 +363,7 @@ bool Scene::buildClusters()
               assert(newCount <= triangleRange.count);
               triangleRange.count = newCount;
             },
-            numThreads);
+            numInnerThreads);
       }
 
       nvcluster::SpatialElements spatial;
@@ -405,7 +413,9 @@ bool Scene::buildClusters()
         // fill clusters
         nvh::parallel_batches_indexed(
             numClusters,
-            [&](uint64_t idx, uint32_t threadIdx) {
+            [&](uint64_t idx, uint32_t threadInnerIdx) {
+              uint32_t threadIdx = preferInnerParallelism ? threadInnerIdx : threadOuterIndex;
+
               shaderio::Cluster& cluster      = geom.clusters[idx];
               nvcluster::Range   clusterRange = storage.clusterRanges[idx];
 
@@ -459,7 +469,7 @@ bool Scene::buildClusters()
               assert(numVertices <= 255);
               cluster.numVertices = numVertices;
             },
-            numThreads);
+            numInnerThreads);
 
         // compact local vertices
         uint32_t writeOffset = 0;
@@ -481,9 +491,9 @@ bool Scene::buildClusters()
 
         if(m_config.clusterVertices > 256)
         {
+          fatalError = true;
           LOGE("FATAL ERROR: geometry %zu generated clusters beyond 256 limitation\n", g);
-          nvclusterDestroyContext(nvclusterContext);
-          return false;
+          return;
         }
       }
     }
@@ -500,14 +510,14 @@ bool Scene::buildClusters()
       geom.clusterLocalTriangles.resize(meshlets.size() * m_config.clusterTriangles * 3);
       geom.clusterLocalVertices.resize(meshlets.size() * m_config.clusterVertices);
 
-      const float coneWeight = -1.f; // use axis aligned metrics
-      const float splitFactor = 2.f; // limit disconnected clusters
+      const float coneWeight  = -1.f;  // use axis aligned metrics
+      const float splitFactor = 2.f;   // limit disconnected clusters
 
-      size_t numClusters =
-          meshopt_buildMeshletsFlex(meshlets.data(), geom.clusterLocalVertices.data(), geom.clusterLocalTriangles.data(),
-                                    (uint32_t*)geom.triangles.data(), geom.triangles.size() * 3,
-                                    (float*)geom.positions.data(), geom.numVertices, sizeof(glm::vec3),
-                                    std::min(255u, m_config.clusterVertices), minTriangles, m_config.clusterTriangles, coneWeight, splitFactor);
+      size_t numClusters = meshopt_buildMeshletsFlex(meshlets.data(), geom.clusterLocalVertices.data(),
+                                                     geom.clusterLocalTriangles.data(), (uint32_t*)geom.triangles.data(),
+                                                     geom.triangles.size() * 3, (float*)geom.positions.data(), geom.numVertices,
+                                                     sizeof(glm::vec3), std::min(255u, m_config.clusterVertices),
+                                                     minTriangles, m_config.clusterTriangles, coneWeight, splitFactor);
 
       geom.numClusters = uint32_t(numClusters);
 
@@ -537,7 +547,7 @@ bool Scene::buildClusters()
         uint32_t perThreadIndices = numMaxTriangles * 3 * 2 + uint32_t(meshopt_stripifyBound(numMaxTriangles * 3));
 
         std::atomic_uint32_t  numStrips = 0;
-        std::vector<uint32_t> threadIndices(numThreads * perThreadIndices);
+        std::vector<uint32_t> threadIndices(numInnerThreads * perThreadIndices);
 
         nvh::parallel_ranges(
             geom.numClusters,
@@ -580,7 +590,7 @@ bool Scene::buildClusters()
                 }
               }
             },
-            numThreads);
+            numInnerThreads);
 
 
         numTotalTriangles += geom.numTriangles;
@@ -609,7 +619,7 @@ bool Scene::buildClusters()
                 }
               }
             },
-            numThreads);
+            numInnerThreads);
       }
 
       // rebuild triangle buffer accounting for cluster order
@@ -658,7 +668,7 @@ bool Scene::buildClusters()
                 }
               }
             },
-            numThreads);
+            numInnerThreads);
 
         shaderio::Cluster& cluster = geom.clusters[geom.numClusters - 1];
         geom.clusterLocalTriangles.resize(cluster.firstLocalTriangle + cluster.numTriangles * 3);
@@ -694,18 +704,23 @@ bool Scene::buildClusters()
                 geom.clusterBboxes[idx] = bbox;
               }
             },
-            numThreads);
+            numInnerThreads);
       }
     }
-
 
     m_numClusters += geom.numClusters;
 
     m_maxPerGeometryClusters = std::max(m_maxPerGeometryClusters, geom.numClusters);
     m_maxPerGeometryClusterVertices = std::max(m_maxPerGeometryClusterVertices, uint32_t(geom.clusterLocalVertices.size()));
-  }
+  };
+
+  nvh::parallel_batches_indexed<1>(m_geometries.size(), fnProcessGeometry, numOuterThreads);
 
   nvclusterDestroyContext(nvclusterContext);
+  if(fatalError)
+  {
+    return false;
+  }
 
   double endTime = clock.getMicroSeconds();
   LOGI("Scene cluster build time: %f milliseconds\n", (endTime - startTime) / 1000.0f);
