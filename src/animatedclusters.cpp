@@ -288,6 +288,14 @@ bool AnimatedClusters::initCore(nvvk::Context& context, int winWidth, int winHei
     }
   }
 
+  {
+    // change startup default modes depending on animation state
+    m_tweak.blasBuildMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
+    m_tweak.templateInstantiateMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
+    m_tweak.clusterBuildMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
+    m_tweak.useTemplates     = m_rendererConfig.doAnimation;
+  }
+
   if(initScene(!m_modelFilename.empty() ? m_modelFilename.c_str() : nullptr))
   {
     postInitNewScene();

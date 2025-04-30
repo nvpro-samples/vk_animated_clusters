@@ -120,6 +120,8 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
 
   // for emphasized parameter we want to recommend to the user
   const ImVec4 recommendedColor = ImVec4(0.0, 1.0, 0.0, 1.0);
+  // for warnings
+  const ImVec4 warnColor = ImVec4(1.0, 0.7, 0.3, 1.0);
 
   namespace PE = ImGuiH::PropertyEditor;
 
@@ -145,7 +147,17 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
     });
 
     PE::entry("Super sampling", [&]() { return m_ui.enumCombobox(GUI_SUPERSAMPLE, "sampling", &m_tweak.supersample); });
+
+    bool isRayTracing = m_tweak.renderer == RENDERER_RAYTRACE_CLUSTERS || m_tweak.renderer == RENDERER_RAYTRACE_TRIANGLES;
+    if(isRayTracing && m_tweak.supersample > 1)
+    {
+      ImGui::PushStyleColor(ImGuiCol_Text, warnColor);
+    }
     PE::Text("Render Resolution:", "%d x %d", m_resources.m_framebuffer.renderWidth, m_resources.m_framebuffer.renderHeight);
+    if(isRayTracing && m_tweak.supersample > 1)
+    {
+      ImGui::PopStyleColor();
+    }
     PE::Checkbox("Facet shading", &m_tweak.facetShading);
 
     // conditional UI, declutters the UI, prevents presenting many sections in disabled state
@@ -234,7 +246,13 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
   if(ImGui::CollapsingHeader("Animation", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
     PE::begin("##Animation");
-    PE::Checkbox("Enable animation", &m_rendererConfig.doAnimation);
+    if(PE::Checkbox("Enable animation", &m_rendererConfig.doAnimation))
+    {
+      m_tweak.blasBuildMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
+      m_tweak.templateInstantiateMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
+      m_tweak.clusterBuildMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
+      m_tweak.useTemplates = m_rendererConfig.doAnimation;
+    }
 
     ImGui::BeginDisabled(!m_rendererConfig.doAnimation);
     PE::SliderFloat("Override time value", &m_tweak.overrideTime, 0, 10.0f, "%0.3f", 0, "Set to 0 disables override");
