@@ -21,6 +21,7 @@
 #include <nvvk/sbtwrapper_vk.hpp>
 #include <nvvk/images_vk.hpp>
 #include <nvvkhl/pipeline_container.hpp>
+#include <nvh/alignment.hpp>
 
 #include "renderer.hpp"
 
@@ -50,6 +51,8 @@ private:
   void initRayTracingPipeline(Resources& res);
 
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
+  VkPhysicalDeviceAccelerationStructurePropertiesKHR m_accProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+  
   nvvk::SBTWrapper          m_rtSbt;   // Shading binding table wrapper
   nvvkhl::PipelineContainer m_rtPipe;  // Hold pipelines and layout
 
@@ -109,6 +112,7 @@ bool RendererRayTraceTriangles::init(Resources& res, Scene& scene, const Rendere
   m_resourceUsageInfo.sceneMemBytes += scene.m_sceneTriangleMemBytes;
 
   VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &m_rtProperties};
+  m_rtProperties.pNext = &m_accProperties;
   vkGetPhysicalDeviceProperties2(res.m_physical, &prop2);
 
   initRayTracingBlas(res, scene, config);
@@ -132,7 +136,7 @@ bool RendererRayTraceTriangles::init(Resources& res, Scene& scene, const Rendere
   }
   else
   {
-    uint32_t blasCount = static_cast<uint32_t>(m_renderInstances.size());
+    uint32_t blasCount = static_cast<uint32_t>(m_blas.size());
 
     // for compaction we need a querypool to get the compacted blas sizes
     VkQueryPoolCreateInfo poolCreateInfo = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
@@ -155,10 +159,10 @@ bool RendererRayTraceTriangles::init(Resources& res, Scene& scene, const Rendere
     compactRayTracingBlas(cmd, queryPool, oldBlas, res, scene);
 
     // feed most recent m_blas into tlas
-    std::vector<VkAccelerationStructureKHR> blas(m_blas.size());
-    for(size_t i = 0; i < blas.size(); i++)
+    std::vector<VkAccelerationStructureKHR> blas(m_renderInstances.size());
+    for(size_t i = 0; i < m_renderInstances.size(); i++)
     {
-      blas[i] = m_blas[i].accel;
+      blas[i] = m_blas[m_renderInstances[i].geometryID].accel;
     }
     initRayTracingTlas(res, scene, config, blas.data());
     // update tlas along
@@ -231,7 +235,7 @@ void RendererRayTraceTriangles::render(VkCommandBuffer primary, Resources& res, 
 
 void RendererRayTraceTriangles::initRayTracingBlas(Resources& res, Scene& scene, const RendererConfig& config)
 {
-  uint32_t     blasCount = static_cast<uint32_t>(m_renderInstances.size());
+  uint32_t blasCount = static_cast<uint32_t>(config.doAnimation ? m_renderInstances.size() : scene.m_geometries.size());
   VkDeviceSize totalBlasSize{0};     // Memory size of all allocated BLAS
   VkDeviceSize totalScratchSize{0};  // Total ScratchSize
   VkDeviceSize maxScratchSize{0};    // Total ScratchSize
@@ -245,14 +249,16 @@ void RendererRayTraceTriangles::initRayTracingBlas(Resources& res, Scene& scene,
 
   for(uint32_t idx = 0; idx < blasCount; idx++)
   {
+    uint32_t instanceIdx = config.doAnimation ? idx : m_geometryFirstInstance[idx];
+
     VkAccelerationStructureGeometryTrianglesDataKHR triangles{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
 
     triangles.vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT;
-    triangles.vertexData.deviceAddress = m_renderInstances[idx].positions;
+    triangles.vertexData.deviceAddress = m_renderInstances[instanceIdx].positions;
     triangles.vertexStride             = sizeof(glm::vec3);
-    triangles.maxVertex                = m_renderInstances[idx].numVertices - 1;
+    triangles.maxVertex                = m_renderInstances[instanceIdx].numVertices - 1;
     triangles.indexType                = VK_INDEX_TYPE_UINT32;
-    triangles.indexData.deviceAddress  = m_renderInstances[idx].triangles;
+    triangles.indexData.deviceAddress  = m_renderInstances[instanceIdx].triangles;
 
 
     // Identify the above data as containing opaque triangles.
@@ -265,7 +271,7 @@ void RendererRayTraceTriangles::initRayTracingBlas(Resources& res, Scene& scene,
 
     VkAccelerationStructureBuildRangeInfoKHR offset{};
 
-    offset.primitiveCount  = m_renderInstances[idx].numTriangles;
+    offset.primitiveCount  = m_renderInstances[instanceIdx].numTriangles;
     offset.primitiveOffset = 0;
     offset.firstVertex     = 0;
     offset.transformOffset = 0;
@@ -292,14 +298,15 @@ void RendererRayTraceTriangles::initRayTracingBlas(Resources& res, Scene& scene,
 
     // Extra info
     totalBlasSize += m_blasSizeInfos[idx].accelerationStructureSize;
-    totalScratchSize += m_blasSizeInfos[idx].buildScratchSize;
+    totalScratchSize +=
+        nvh::align_up(m_blasSizeInfos[idx].buildScratchSize, m_accProperties.minAccelerationStructureScratchOffsetAlignment);
     maxScratchSize = std::max(maxScratchSize, m_blasSizeInfos[idx].buildScratchSize);
   }
 
   // Allocate the scratch buffers holding the temporary data of the acceleration structure builder
 
   m_blasScratchBuffer = res.createBuffer(std::min(std::max(maxScratchSize, MAX_BLAS_SCRATCH_BUFFER_SIZE), totalScratchSize),
-                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
   m_resourceUsageInfo.rtOtherMemBytes += m_blasScratchBuffer.info.range;
 
   for(uint32_t idx = 0; idx < blasCount; idx++)
@@ -320,7 +327,7 @@ void RendererRayTraceTriangles::queryCompactRayTracingBlas(VkCommandBuffer cmd, 
 {
   assert(!m_config.doAnimation);
 
-  uint32_t blasCount = static_cast<uint32_t>(m_renderInstances.size());
+  uint32_t blasCount = static_cast<uint32_t>(m_blas.size());
 
   std::vector<VkAccelerationStructureKHR> structures(blasCount);
   for(uint32_t idx = 0; idx < blasCount; idx++)
@@ -340,7 +347,7 @@ void RendererRayTraceTriangles::compactRayTracingBlas(VkCommandBuffer           
 {
   assert(!m_config.doAnimation);
 
-  uint32_t blasCount = static_cast<uint32_t>(m_renderInstances.size());
+  uint32_t blasCount = static_cast<uint32_t>(m_blas.size());
 
   oldBlas.resize(blasCount);
 
@@ -379,7 +386,7 @@ void RendererRayTraceTriangles::compactRayTracingBlas(VkCommandBuffer           
 
 void RendererRayTraceTriangles::updateRayTracingBlas(VkCommandBuffer cmd, Resources& res, Scene& scene, float rebuildFraction)
 {
-  auto blasCount = static_cast<uint32_t>(m_renderInstances.size());
+  auto blasCount = static_cast<uint32_t>(m_blas.size());
 
   uint32_t firstIndex = 0;
   uint32_t lastIndex  = blasCount - 1;
@@ -422,7 +429,8 @@ void RendererRayTraceTriangles::updateRayTracingBlas(VkCommandBuffer cmd, Resour
     }
 
     m_blasBuildInfos[idx].scratchData.deviceAddress = m_blasScratchBuffer.address + scratchOffset;
-    scratchOffset += m_blasSizeInfos[idx].buildScratchSize;
+    scratchOffset +=
+        nvh::align_up(m_blasSizeInfos[idx].buildScratchSize, m_accProperties.minAccelerationStructureScratchOffsetAlignment);
 
     // Building the bottom-level-acceleration-structure
     VkAccelerationStructureBuildRangeInfoKHR* rangeInfo = &m_blasRangeInfos[idx];

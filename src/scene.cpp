@@ -109,7 +109,7 @@ void Scene::upload(Resources& res)
     if(geom.positions.size())
     {
       geom.positionsBuffer = res.createBuffer(sizeof(glm::vec3) * geom.positions.size(),
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                                                   | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
       uploader.uploadBuffer(geom.positionsBuffer, geom.positions.data());
@@ -189,16 +189,6 @@ bool Scene::buildClusters()
     m_config.clusterVertices = 0;
   }
 
-  std::vector<nvcluster::AABB> triangleAABBs;
-  std::vector<glm::vec3>       triangleCentroids;
-
-  std::vector<nvcluster::Range> vertexTriangleRanges;
-  std::vector<uint32_t>         vertexTriangles;
-
-  std::vector<nvcluster::Range> triangleConnectionRanges;
-  std::vector<float>            triangleConnectionWeights;
-  std::vector<uint32_t>         triangleConnectionTargets;
-
   std::vector<uint32_t> threadCacheEarly(numThreads * 256);
 
   uint64_t numTotalTriangles = 0;
@@ -215,11 +205,15 @@ bool Scene::buildClusters()
 
     if(m_config.clusterNvLibrary)
     {
-      triangleAABBs.resize(geom.numTriangles);
-      triangleCentroids.resize(geom.numTriangles);
-      triangleConnectionRanges.resize(geom.numTriangles);
-      vertexTriangleRanges.clear();
-      vertexTriangleRanges.resize(geom.numVertices + 1, {0, 0});
+      std::vector<nvcluster::AABB> triangleAABBs(geom.numTriangles);
+      std::vector<glm::vec3>       triangleCentroids(geom.numTriangles);
+
+      std::vector<nvcluster::Range> vertexTriangleRanges(geom.numVertices + 1, {0, 0});
+      std::vector<uint32_t>         vertexTriangles;
+
+      std::vector<nvcluster::Range> triangleConnectionRanges(geom.numTriangles);
+      std::vector<float>            triangleConnectionWeights;
+      std::vector<uint32_t>         triangleConnectionTargets;
 
       static_assert(std::atomic_uint32_t::is_always_lock_free && sizeof(uint32_t) == sizeof(std::atomic_uint32_t));
 

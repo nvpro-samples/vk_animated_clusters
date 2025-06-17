@@ -1,4 +1,6 @@
 # Changelog for vk_animated_clusters
+* 2025/5/28:
+  * Reduce memory consumption when animation is disabled: allocate normals, clas and blas only once per unique geometry.
 * 2025/4/30:
   * Automatically set preferred ray tracing build settings when animation is toggled on or off in UI.
   * Highlight render resolution in UI when ray tracing.

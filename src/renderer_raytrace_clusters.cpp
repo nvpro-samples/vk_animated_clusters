@@ -70,17 +70,18 @@ private:
     nvvk::ShaderModuleID closestHitShader;
     nvvk::ShaderModuleID missShader;
     nvvk::ShaderModuleID missShaderAO;
-    nvvk::ShaderModuleID computeStatistics;
+    nvvk::ShaderModuleID computeBlasInstances;
   } m_shaders;
 
-  VkPipeline       m_computeStatisticsPipeline = nullptr;
-  VkPipelineLayout m_computeStatisticsLayout   = nullptr;
+  VkPipeline       m_computeBlasInstancesPipeline = nullptr;
+  VkPipelineLayout m_computeBlasInstancesLayout   = nullptr;
 
   nvvk::DescriptorSetContainer m_dsetContainer;
 
   // auxiliary rendering data
 
   uint32_t m_numTotalClusters = 0;
+  uint32_t m_blasCount        = 0;
 
   VkClusterAccelerationStructureTriangleClusterInputNV     m_clusterTriangleInput;
   VkClusterAccelerationStructureClustersBottomLevelInputNV m_clusterBlasInput;
@@ -116,14 +117,17 @@ private:
   RBuffer m_clusterDstBuffer;   // explicit cluster dst for instantiation, otherwise implicit dst
   RBuffer m_clusterSizeBuffer;  // just for statistics
 
-  // updated every frame
-  RBuffer      m_clusterBuffer;                        // cluster dst content
-  RLargeBuffer m_clusterBlasBuffer;                    // blas dst content
-  RBuffer      m_renderInstanceClusterBlasInfoBuffer;  // blas build src
-  RBuffer      m_renderInstanceClusterBlasSizeBuffer;  // just for statistics
+  // updated every frame in animation
+  RBuffer      m_clusterBuffer;          // cluster dst content
+  RLargeBuffer m_clusterBlasBuffer;      // blas dst content
+  RBuffer      m_clusterBlasInfoBuffer;  // blas build src
+  RBuffer      m_clusterBlasSizeBuffer;  // just for statistics
+  RBuffer      m_clusterBlasAddressBuffer;
 
   VkDeviceSize m_scratchSize = 0;
   RBuffer      m_scratchBuffer;
+
+  bool m_forceUpdate = true;
 };
 
 bool RendererRayTraceClusters::initShaders(Resources& res, Scene& scene, const RendererConfig& config)
@@ -138,7 +142,8 @@ bool RendererRayTraceClusters::initShaders(Resources& res, Scene& scene, const R
                                                                 "#define RAYTRACING_PAYLOAD_INDEX 0\n");
   m_shaders.missShaderAO = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl",
                                                                   "#define RAYTRACING_PAYLOAD_INDEX 1\n");
-  m_shaders.computeStatistics = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "cluster_statistics.comp.glsl");
+  m_shaders.computeBlasInstances =
+      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "cluster_blas_instances.comp.glsl");
 
   if(!res.verifyShaders(m_shaders))
   {
@@ -172,23 +177,23 @@ bool RendererRayTraceClusters::init(Resources& res, Scene& scene, const Renderer
   {
     VkPushConstantRange pushRange;
     pushRange.offset     = 0;
-    pushRange.size       = sizeof(shaderio::StatisticsConstants);
+    pushRange.size       = sizeof(shaderio::ClusterBlasConstants);
     pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkPipelineLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     layoutInfo.pPushConstantRanges        = &pushRange;
     layoutInfo.pushConstantRangeCount     = 1;
-    vkCreatePipelineLayout(res.m_device, &layoutInfo, nullptr, &m_computeStatisticsLayout);
+    vkCreatePipelineLayout(res.m_device, &layoutInfo, nullptr, &m_computeBlasInstancesLayout);
 
     VkComputePipelineCreateInfo compInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     compInfo.stage                       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     compInfo.stage.stage                 = VK_SHADER_STAGE_COMPUTE_BIT;
     compInfo.stage.pName                 = "main";
-    compInfo.layout                      = m_computeStatisticsLayout;
+    compInfo.layout                      = m_computeBlasInstancesLayout;
     compInfo.flags                       = VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeStatistics);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_computeStatisticsPipeline);
+    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeBlasInstances);
+    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_computeBlasInstancesPipeline);
   }
 
   return true;
@@ -196,17 +201,20 @@ bool RendererRayTraceClusters::init(Resources& res, Scene& scene, const Renderer
 
 void RendererRayTraceClusters::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
 {
-  if(m_config.doAnimation)
+  vkCmdUpdateBuffer(primary, res.m_common.view.buffer, 0, sizeof(shaderio::FrameConstants), (const uint32_t*)&frame.frameConstants);
+  vkCmdFillBuffer(primary, res.m_common.readbackDevice.buffer, 0, sizeof(shaderio::Readback), 0);
+
+  if(m_config.doAnimation || m_forceUpdate)
   {
-    updateAnimation(primary, res, scene, frame, profiler);
+    if(m_config.doAnimation)
+    {
+      updateAnimation(primary, res, scene, frame, profiler);
+    }
     {
       auto timerSection = profiler.timeRecurring("AS Build/Refit", primary);
       updateRayTracingScene(primary, res, scene, frame, profiler);
     }
   }
-
-  vkCmdUpdateBuffer(primary, res.m_common.view.buffer, 0, sizeof(shaderio::FrameConstants), (const uint32_t*)&frame.frameConstants);
-  vkCmdFillBuffer(primary, res.m_common.readbackDevice.buffer, 0, sizeof(shaderio::Readback), 0);
 
   VkMemoryBarrier memBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
   memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -234,30 +242,36 @@ void RendererRayTraceClusters::render(VkCommandBuffer primary, Resources& res, S
 
   {
     // statistics
-    shaderio::StatisticsConstants statisticsConstants;
+    shaderio::ClusterBlasConstants blasConstants{};
 
     // over all clusters
-    vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_computeStatisticsPipeline);
+    vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_computeBlasInstancesPipeline);
 
+    uint32_t numClusters   = uint32_t(m_clusterSizeBuffer.info.range / sizeof(uint32_t));
+    blasConstants.sumCount = numClusters;
+    blasConstants.sizes    = m_clusterSizeBuffer.address;
+    blasConstants.sum      = res.m_common.readbackDevice.address + offsetof(shaderio::Readback, clustersSize);
 
-    uint32_t numClusters      = uint32_t(m_clusterSizeBuffer.info.range / sizeof(uint32_t));
-    statisticsConstants.count = numClusters;
-    statisticsConstants.sizes = m_clusterSizeBuffer.address;
-    statisticsConstants.sum   = res.m_common.readbackDevice.address + offsetof(shaderio::Readback, clustersSize);
+    vkCmdPushConstants(primary, m_computeBlasInstancesLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       sizeof(shaderio::ClusterBlasConstants), &blasConstants);
+    vkCmdDispatch(primary, (numClusters + CLUSTER_BLAS_WORKGROUP_SIZE - 1) / CLUSTER_BLAS_WORKGROUP_SIZE, 1, 1);
 
-    vkCmdPushConstants(primary, m_computeStatisticsLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                       sizeof(shaderio::StatisticsConstants), &statisticsConstants);
-    vkCmdDispatch(primary, (numClusters + STATISTICS_WORKGROUP_SIZE - 1) / STATISTICS_WORKGROUP_SIZE, 1, 1);
+    if(!(m_config.doAnimation || m_forceUpdate))
+    {
+      // get stats for blas
 
-    uint32_t numInstances     = uint32_t(m_renderInstanceClusterBlasSizeBuffer.info.range / sizeof(uint32_t));
-    statisticsConstants.count = numInstances;
-    statisticsConstants.sizes = m_renderInstanceClusterBlasSizeBuffer.address;
-    statisticsConstants.sum   = res.m_common.readbackDevice.address + offsetof(shaderio::Readback, blasesSize);
+      uint32_t numBlas       = uint32_t(m_clusterBlasSizeBuffer.info.range / sizeof(uint32_t));
+      blasConstants.sumCount = numBlas;
+      blasConstants.sizes    = m_clusterBlasSizeBuffer.address;
+      blasConstants.sum      = res.m_common.readbackDevice.address + offsetof(shaderio::Readback, blasesSize);
 
-    vkCmdPushConstants(primary, m_computeStatisticsLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                       sizeof(shaderio::StatisticsConstants), &statisticsConstants);
-    vkCmdDispatch(primary, (numInstances + STATISTICS_WORKGROUP_SIZE - 1) / STATISTICS_WORKGROUP_SIZE, 1, 1);
+      vkCmdPushConstants(primary, m_computeBlasInstancesLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                         sizeof(shaderio::ClusterBlasConstants), &blasConstants);
+      vkCmdDispatch(primary, (numBlas + CLUSTER_BLAS_WORKGROUP_SIZE - 1) / CLUSTER_BLAS_WORKGROUP_SIZE, 1, 1);
+    }
   }
+
+  m_forceUpdate = false;
 }
 
 void RendererRayTraceClusters::updateRayTracingScene(VkCommandBuffer cmd, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
@@ -286,15 +300,46 @@ void RendererRayTraceClusters::updateRayTracingScene(VkCommandBuffer cmd, Resour
     updateRayTracingBlas(cmd, res, scene);
   }
 
-  memBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-  memBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+  memBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR
+                             | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_TRANSFER_WRITE_BIT;
+  memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+
+
+  // fill in per instance blas addresses after the blas were built
+  {
+    shaderio::ClusterBlasConstants blasConstants{};
+
+    uint32_t numBlas       = uint32_t(m_clusterBlasSizeBuffer.info.range / sizeof(uint32_t));
+    blasConstants.sumCount = numBlas;
+    blasConstants.sizes    = m_clusterBlasSizeBuffer.address;
+    blasConstants.sum      = res.m_common.readbackDevice.address + offsetof(shaderio::Readback, blasesSize);
+
+    blasConstants.instanceCount = uint32_t(m_renderInstances.size());
+    blasConstants.animated      = m_config.doAnimation ? 1 : 0;
+    blasConstants.blasAddresses = m_clusterBlasAddressBuffer.address;
+    blasConstants.instances     = m_renderInstanceBuffer.address;
+    blasConstants.rayInstances  = m_tlasInstancesBuffer.address;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_computeBlasInstancesPipeline);
+
+    vkCmdPushConstants(cmd, m_computeBlasInstancesLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       sizeof(shaderio::ClusterBlasConstants), &blasConstants);
+    vkCmdDispatch(cmd, (std::max(blasConstants.instanceCount, blasConstants.sumCount) + CLUSTER_BLAS_WORKGROUP_SIZE - 1) / CLUSTER_BLAS_WORKGROUP_SIZE,
+                  1, 1);
+  }
+
+  memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  memBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR
+                             | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                       0, 1, &memBarrier, 0, nullptr, 0, nullptr);
 
   // run tlas build/update
   {
     auto timerSection = profiler.timeRecurring("tlas", cmd);
-    updateRayTracingTlas(cmd, res, scene, !frame.forceTlasFullRebuild);
+    updateRayTracingTlas(cmd, res, scene, !(frame.forceTlasFullRebuild || m_forceUpdate));
   }
 
   memBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
@@ -372,24 +417,23 @@ void RendererRayTraceClusters::updateRayTracingBlas(VkCommandBuffer cmd, Resourc
   VkClusterAccelerationStructureInputInfoNV inputs = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
 
   // setup blas inputs
-  inputs.maxAccelerationStructureCount = uint32_t(m_renderInstances.size());
+  inputs.maxAccelerationStructureCount = m_blasCount;
   inputs.opMode                        = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
   inputs.opType                        = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_CLUSTERS_BOTTOM_LEVEL_NV;
   inputs.opInput.pClustersBottomLevel  = &m_clusterBlasInput;
   inputs.flags                         = m_config.clusterBlasFlags;
 
   // we feed the generated blas addresses directly into the ray instances
-  cmdInfo.dstAddressesArray.deviceAddress =
-      m_tlasInstancesBuffer.address + offsetof(VkAccelerationStructureInstanceKHR, accelerationStructureReference);
-  cmdInfo.dstAddressesArray.size   = m_tlasInstancesBuffer.info.range;
-  cmdInfo.dstAddressesArray.stride = sizeof(VkAccelerationStructureInstanceKHR);
+  cmdInfo.dstAddressesArray.deviceAddress = m_clusterBlasAddressBuffer.address;
+  cmdInfo.dstAddressesArray.size          = m_clusterBlasAddressBuffer.info.range;
+  cmdInfo.dstAddressesArray.stride        = sizeof(VkDeviceAddress);
 
-  cmdInfo.dstSizesArray.deviceAddress = m_renderInstanceClusterBlasSizeBuffer.address;
-  cmdInfo.dstSizesArray.size          = m_renderInstanceClusterBlasSizeBuffer.info.range;
+  cmdInfo.dstSizesArray.deviceAddress = m_clusterBlasSizeBuffer.address;
+  cmdInfo.dstSizesArray.size          = m_clusterBlasSizeBuffer.info.range;
   cmdInfo.dstSizesArray.stride        = sizeof(uint32_t);
 
-  cmdInfo.srcInfosArray.deviceAddress = m_renderInstanceClusterBlasInfoBuffer.address;
-  cmdInfo.srcInfosArray.size          = m_renderInstanceClusterBlasInfoBuffer.info.range;
+  cmdInfo.srcInfosArray.deviceAddress = m_clusterBlasInfoBuffer.address;
+  cmdInfo.srcInfosArray.size          = m_clusterBlasInfoBuffer.info.range;
   cmdInfo.srcInfosArray.stride        = sizeof(VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV);
 
   // in implicit mode we provide one big chunk from which outputs are sub-allocated
@@ -414,6 +458,11 @@ bool RendererRayTraceClusters::initRayTracingScene(Resources& res, Scene& scene,
 
   for(size_t i = 0; i < m_renderInstances.size(); i++)
   {
+    // in static mode we only build data for the first instance per-geometry
+    // which is the one that has the normals
+    if(!m_renderInstanceBuffers[i].normals.buffer)
+      continue;
+
     const shaderio::RenderInstance& renderInstance = m_renderInstances[i];
     const Scene::Geometry&          geometry       = scene.m_geometries[renderInstance.geometryID];
     m_clusterTriangleInput.maxTotalTriangleCount += geometry.numTriangles;
@@ -443,34 +492,6 @@ bool RendererRayTraceClusters::initRayTracingScene(Resources& res, Scene& scene,
 
   m_scratchBuffer = res.createBuffer(m_scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   m_resourceUsageInfo.rtOtherMemBytes += m_scratchBuffer.info.range;
-
-  // initial build
-  {
-    VkCommandBuffer cmd = res.createTempCmdBuffer();
-
-    updateRayTracingClusters(cmd, res, scene);
-
-    VkMemoryBarrier memBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    memBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    memBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
-
-    updateRayTracingBlas(cmd, res, scene);
-
-
-    memBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR
-                               | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_TRANSFER_WRITE_BIT;
-    memBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
-
-    updateRayTracingTlas(cmd, res, scene);
-
-    printf("submitting cluster init\n");
-    res.tempSyncSubmit(cmd);
-    printf("done\n");
-  }
 
   return true;
 }
@@ -864,6 +885,11 @@ void RendererRayTraceClusters::initRayTracingTemplateInstantiations(Resources& r
   size_t numClusters    = 0;
   for(size_t i = 0; i < m_renderInstances.size(); i++)
   {
+    // in static mode we only build data for the first instance per-geometry
+    // which is the one that has the normals
+    if(!m_renderInstanceBuffers[i].normals.buffer)
+      continue;
+
     uint32_t geometryID = m_renderInstances[i].geometryID;
 
     m_renderInstanceClusters[i].clusterBuffer =
@@ -900,6 +926,11 @@ void RendererRayTraceClusters::initRayTracingTemplateInstantiations(Resources& r
   size_t clusterOffset = 0;
   for(size_t i = 0; i < m_renderInstances.size(); i++)
   {
+    // in static mode we only build data for the first instance per-geometry
+    // which is the one that has the normals
+    if(!m_renderInstanceBuffers[i].normals.buffer)
+      continue;
+
     const shaderio::RenderInstance&  renderInstance        = m_renderInstances[i];
     const RenderInstanceClusterData& renderInstanceCluster = m_renderInstanceClusters[i];
     GeometryTemplate&                geometryTemplate      = m_geometryTemplates[renderInstance.geometryID];
@@ -997,6 +1028,11 @@ void RendererRayTraceClusters::initRayTracingClusters(Resources& res, Scene& sce
 
     for(size_t i = 0; i < m_renderInstances.size(); i++)
     {
+      // in static mode we only build data for the first instance per-geometry
+      // which is the one that has the normals
+      if(!m_renderInstanceBuffers[i].normals.buffer)
+        continue;
+
       uint32_t geometryID = m_renderInstances[i].geometryID;
 
       m_renderInstanceClusters[i].clusterBuffer =
@@ -1039,6 +1075,11 @@ void RendererRayTraceClusters::initRayTracingClusters(Resources& res, Scene& sce
   size_t clusterOffset = 0;
   for(size_t i = 0; i < m_renderInstances.size(); i++)
   {
+    // in static mode we only build data for the first instance per-geometry
+    // which is the one that has the normals
+    if(!m_renderInstanceBuffers[i].normals.buffer)
+      continue;
+
     const shaderio::RenderInstance& renderInstance = m_renderInstances[i];
 
     const Scene::Geometry& geometry = scene.m_geometries[renderInstance.geometryID];
@@ -1113,16 +1154,25 @@ bool RendererRayTraceClusters::initRayTracingBlas(Resources& res, Scene& scene, 
   // Setting up the BLAS is agnostic to whether template instantiations or regular CLAS builds are used.
   // In both cases we provide a list of the freshly built CLAS references.
 
-  std::vector<VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV> blasInfos(m_renderInstances.size(), {0});
+  std::vector<VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV> blasInfos(
+      config.doAnimation ? m_renderInstances.size() : scene.m_geometries.size(), {0});
 
+  size_t blasOffset    = 0;
   size_t clusterOffset = 0;
   for(size_t i = 0; i < m_renderInstances.size(); i++)
   {
+    // in static mode we only build data for the first instance per-geometry
+    // which is the one that has the normals
+    if(!m_renderInstanceBuffers[i].normals.buffer)
+      continue;
+
     const shaderio::RenderInstance& renderInstance = m_renderInstances[i];
     const Scene::Geometry&          geometry       = scene.m_geometries[renderInstance.geometryID];
 
+    size_t blasOffset = config.doAnimation ? i : renderInstance.geometryID;
+
     // setup blas/ray instance
-    VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV& blasInfo = blasInfos[i];
+    VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV& blasInfo = blasInfos[blasOffset];
     // starting address of array of the dst cluster addresses from instantiation
     // becomes input for blas build
     blasInfo.clusterReferences       = m_clusterDstBuffer.address + sizeof(uint64_t) * clusterOffset;
@@ -1134,30 +1184,35 @@ bool RendererRayTraceClusters::initRayTracingBlas(Resources& res, Scene& scene, 
 
   // required inputs for blas building and tlas building
   // we will always use implicit mode for this
-  m_renderInstanceClusterBlasInfoBuffer =
+  m_clusterBlasInfoBuffer =
       res.createBuffer(sizeof(VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV) * blasInfos.size(),
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  m_resourceUsageInfo.rtOtherMemBytes += m_renderInstanceClusterBlasInfoBuffer.info.range;
+  m_resourceUsageInfo.rtOtherMemBytes += m_clusterBlasInfoBuffer.info.range;
 
-  m_renderInstanceClusterBlasSizeBuffer =
-      res.createBuffer(sizeof(uint32_t) * blasInfos.size(),
+  m_clusterBlasSizeBuffer = res.createBuffer(sizeof(uint32_t) * blasInfos.size(),
+                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                 | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  m_resourceUsageInfo.rtOtherMemBytes += m_clusterBlasSizeBuffer.info.range;
+
+  m_clusterBlasAddressBuffer =
+      res.createBuffer(sizeof(uint64_t) * blasInfos.size(),
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  m_resourceUsageInfo.rtOtherMemBytes += m_renderInstanceClusterBlasSizeBuffer.info.range;
+  m_resourceUsageInfo.rtOtherMemBytes += m_clusterBlasAddressBuffer.info.range;
 
-  res.simpleUploadBuffer(m_renderInstanceClusterBlasInfoBuffer, blasInfos.data());
+  res.simpleUploadBuffer(m_clusterBlasInfoBuffer, blasInfos.data());
 
 
   // BLAS space requirement (implicit)
   // the size of the generated blas is dynamic, need to query prebuild info.
   {
-    uint32_t numInstances = (uint32_t)blasInfos.size();
+    uint32_t blasCount = (uint32_t)blasInfos.size();
 
     m_clusterBlasInput = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_CLUSTERS_BOTTOM_LEVEL_INPUT_NV};
     m_clusterBlasInput.maxClusterCountPerAccelerationStructure = scene.m_maxPerGeometryClusters;
     m_clusterBlasInput.maxTotalClusterCount                    = m_numTotalClusters;
 
     VkClusterAccelerationStructureInputInfoNV inputs = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
-    inputs.maxAccelerationStructureCount             = numInstances;
+    inputs.maxAccelerationStructureCount             = blasCount;
     inputs.opMode                       = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
     inputs.opType                       = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_CLUSTERS_BOTTOM_LEVEL_NV;
     inputs.opInput.pClustersBottomLevel = &m_clusterBlasInput;
@@ -1171,6 +1226,8 @@ bool RendererRayTraceClusters::initRayTracingBlas(Resources& res, Scene& scene, 
         res.createLargeBuffer(sizesInfo.accelerationStructureSize,
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
     m_resourceUsageInfo.rtBlasMemBytes += m_clusterBlasBuffer.info.range;
+
+    m_blasCount = blasCount;
   }
 
   return true;
@@ -1323,8 +1380,9 @@ void RendererRayTraceClusters::deinit(Resources& res)
     res.destroy(it.clusterBuffer);
   }
 
-  res.destroy(m_renderInstanceClusterBlasInfoBuffer);
-  res.destroy(m_renderInstanceClusterBlasSizeBuffer);
+  res.destroy(m_clusterBlasInfoBuffer);
+  res.destroy(m_clusterBlasSizeBuffer);
+  res.destroy(m_clusterBlasAddressBuffer);
   res.destroy(m_clusterBuffer);
   res.destroy(m_clusterBlasBuffer);
   res.destroy(m_clusterDstBuffer);
@@ -1336,8 +1394,8 @@ void RendererRayTraceClusters::deinit(Resources& res)
   res.destroy(m_tlasScratchBuffer);
   res.destroy(m_tlas);
 
-  vkDestroyPipeline(res.m_device, m_computeStatisticsPipeline, nullptr);
-  vkDestroyPipelineLayout(res.m_device, m_computeStatisticsLayout, nullptr);
+  vkDestroyPipeline(res.m_device, m_computeBlasInstancesPipeline, nullptr);
+  vkDestroyPipelineLayout(res.m_device, m_computeBlasInstancesLayout, nullptr);
 
   m_rtSbt.destroy();               // Shading binding table wrapper
   m_rtPipe.destroy(res.m_device);  // Hold pipelines and layout

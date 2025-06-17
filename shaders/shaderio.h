@@ -28,7 +28,7 @@
 
 //////////////////////////////////////////////////////////////////////////
 
-#define STATISTICS_WORKGROUP_SIZE 64
+#define CLUSTER_BLAS_WORKGROUP_SIZE 128
 #define ANIMATION_WORKGROUP_SIZE 256
 
 //////////////////////////////////////////////////////////////////////////
@@ -119,6 +119,18 @@ struct RenderInstance
   uint64_t originalPositions;
 };
 
+BUFFER_REF_DECLARE_ARRAY(RenderInstances_in, RenderInstance, readonly, 16);
+
+struct RayTracingInstance
+{
+  mat3x4   transform;
+  uint     instanceCustomIndex24_mask8;
+  uint     instanceSbtOffset24_flags8;
+  uint64_t accelerationStructureReference;
+};
+
+BUFFER_REF_DECLARE_ARRAY(RayTracingInstances_inout, RayTracingInstance, , 16);
+
 struct FrameConstants
 {
   mat4 projMatrix;
@@ -179,10 +191,10 @@ struct FrameConstants
   int   supersample;
   uint  colorXor;
 
-  uint                dbgUint;
-  float               dbgFloat;
-  float               time;
-  uint                frame;
+  uint  dbgUint;
+  float dbgFloat;
+  float time;
+  uint  frame;
 
   uvec2 mousePosition;
   float wireThickness;
@@ -243,11 +255,20 @@ struct AnimationConstants
   float    geometrySize;
 };
 
-struct StatisticsConstants
+struct ClusterBlasConstants
 {
+  uint32_t instanceCount;
+  uint32_t sumCount;
+  uint32_t animated;
+  uint32_t _pad;
+
+  BUFFER_REF(RenderInstances_in) instances;
+  BUFFER_REF(RayTracingInstances_inout) rayInstances;
+
+  BUFFER_REF(uint64s_inout) blasAddresses;
+
   BUFFER_REF(uints_in) sizes;
   BUFFER_REF(uint64s_inout) sum;
-  uint32_t count;
 };
 
 struct RayPayload

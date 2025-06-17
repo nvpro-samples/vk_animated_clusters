@@ -40,10 +40,6 @@ layout(push_constant) uniform animationConstantsPush
   AnimationConstants constants;
 };
 
-layout(buffer_reference, scalar) readonly buffer RenderInstances_in
-{
-  RenderInstance instances[];
-};
 
 layout(buffer_reference, buffer_reference_align = 4, scalar) buffer F32Buffer
 {
@@ -69,7 +65,7 @@ void main()
 {
   uint32_t index = gl_GlobalInvocationID.x;
 
-  RenderInstance instance = RenderInstances_in(constants.renderInstances).instances[constants.instanceIndex];
+  RenderInstance instance = RenderInstances_in(constants.renderInstances).d[constants.instanceIndex];
 
 
   if(index >= instance.numVertices)

@@ -56,8 +56,8 @@ public:
   virtual bool init(Resources& res, Scene& scene, const RendererConfig& config) = 0;
   virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler) = 0;
   virtual void deinit(Resources& res) = 0;
-  virtual ~Renderer(){};  // Defined only so that inherited classes also have virtual destructors. Use deinit().
-  virtual void updatedFrameBuffer(Resources& res){};
+  virtual ~Renderer() {};  // Defined only so that inherited classes also have virtual destructors. Use deinit().
+  virtual void updatedFrameBuffer(Resources& res) {};
 
   struct ResourceUsageInfo
   {
@@ -67,7 +67,10 @@ public:
     size_t rtOtherMemBytes{};
     size_t sceneMemBytes{};
 
-    size_t getTotalSum() const { return rtBlasMemBytes + rtTlasMemBytes + rtClasMemBytes + rtOtherMemBytes + sceneMemBytes; }
+    size_t getTotalSum() const
+    {
+      return rtBlasMemBytes + rtTlasMemBytes + rtClasMemBytes + rtOtherMemBytes + sceneMemBytes;
+    }
   };
 
   inline ResourceUsageInfo getResourceUsage() const { return m_resourceUsageInfo; };
@@ -97,6 +100,8 @@ protected:
     RBuffer positions;
     RBuffer normals;
   };
+
+  std::vector<uint32_t> m_geometryFirstInstance;
 
   std::vector<shaderio::RenderInstance> m_renderInstances;
   RBuffer                               m_renderInstanceBuffer;

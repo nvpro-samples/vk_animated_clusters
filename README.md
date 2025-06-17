@@ -31,7 +31,7 @@ More about the extension details later.
 
 ![sample screenshot](docs/sample.jpg)
 
-When no custom glTF 2.0 file is loaded (via commandline or _"File>Open"_), the default scene is created using many instances of the Stanford bunny model. Each instance has a unique set of vertices that are deformed procedurally to create the animation.
+When no custom glTF 2.0 file is loaded (via commandline or _"File>Open"_), the default scene is created using many instances of the Stanford bunny model. When animation is active each instance has a unique set of vertices and normals that are deformed procedurally.
 
 * Change between ray tracing renderers
   * `ray trace triangles`: ray tracing using classical input of triangles within a bottom-level acceleration structure per instance, and a top-level acceleration structure
@@ -42,8 +42,8 @@ When no custom glTF 2.0 file is loaded (via commandline or _"File>Open"_), the d
   * Each instance gets its own set of vertex / normal buffers
   * The _"layout grid axis bits"_ parameter controls the 3D layout of the copies. 
 * Enable or disable the animation with _"Animation"_ section
-  * Enabling animates the individual vertex and normal buffers for each instance using a compute shaders.
-  * You can change the two different effects. Twisting is used to mimic larger deformations, like in skeletal animation, whilst ripple is used for smaller changes. You can also influence how often the traditional ray tracer would do rebuilds rather than just refits. On high twist angles you will see a higher render time loss if only doing refits. 
+  * Enabling animation causes the vertex and normal buffers for each instance to be updated through compute shaders. Ray tracing will use a dedicated BLAS per-instance. With disabled animation the instances will share a common BLAS and vertex and normal buffers resulting in a lot less memory consumption.
+  * You can change the two different animation effects. Twisting is used to mimic larger deformations, like in skeletal animation, whilst ripple is used for smaller changes. You can also influence how often the traditional ray tracer would do rebuilds rather than just refits. On high twist angles you will see a higher render time loss if only doing refits. 
   * The _"Ray tracer specifics"_ settings allow to change the BLAS and TLAS build flags. Note that the sample was mostly meant to showcase faster builds for animated content, therefore no compaction is performed and `VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR` is always set for traditional triangle BLAS.
 * Play with the _"Clusters & CLAS"_ properties
   * _"Cluster/meshlet size"_: We found that 64 triangles 64 vertices works quite well. Larger clusters save more memory and speed up animation updates, but they can negatively impact render time (and espcially mesh-shaders would be sensitive to them). We use a new open-source library for clusterization [nv_cluster_builder](https://github.com/nvpro-samples/nv_cluster_builder) as well as [meshoptimizer](https://github.com/zeux/meshoptimizer) for optimizations.
@@ -228,7 +228,7 @@ The actual **cluster build or template instantiation** is done in `RendererRayTr
 
 The BLAS for the CLAS clusters is setup using `IMPLICIT_DESTINATIONS` and more details can be found within `RendererRayTraceClusters::initRayTracingBlas` and `RendererRayTraceClusters::updateRayTracingBlas`.
 
-We use the same TLAS building for both the traditional ray tracer and the cluster based one. Details are found in `Renderer::initRayTracingTlas` and `Renderer::updateRayTracingTlas` within [renderer.cpp](src/renderer.cpp). The only difference for clusters is that the per-instance blas `instance.accelerationStructureReference` device-address is not provided through a `VkAccelerationStructureKHR` object, but patched in on the device through the `dstAddressesArray` of the cluster BLAS build.
+We use the same TLAS building for both the traditional ray tracer and the cluster based one. Details are found in `Renderer::initRayTracingTlas` and `Renderer::updateRayTracingTlas` within [renderer.cpp](src/renderer.cpp). The only difference for clusters is that the per-instance blas `instance.accelerationStructureReference` device-address is not provided through a `VkAccelerationStructureKHR` object, but patched in on the device through the `cluster_blas_instances.comp.glsl` compute shader after the cluster BLAS build.
 
 ### Ray Tracing with CLAS
 

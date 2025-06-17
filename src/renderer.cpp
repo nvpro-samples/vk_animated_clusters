@@ -97,6 +97,8 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
   glm::vec3 gridShift;
   glm::mat4 gridRotMatrix;
 
+  m_geometryFirstInstance.resize(scene.m_geometries.size(), ~0);
+
   for(size_t i = 0; i < m_renderInstances.size(); i++)
   {
     size_t originalIndex = i % scene.m_instances.size();
@@ -109,6 +111,13 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
     const Scene::Geometry& geometry   = scene.m_geometries[geometryID];
 
     glm::mat4 worldMatrix = scene.m_instances[originalIndex].matrix;
+
+    bool isFirstInstance = false;
+    if(m_geometryFirstInstance[geometryID] == ~0)
+    {
+      m_geometryFirstInstance[geometryID] = uint32_t(i);
+      isFirstInstance                     = true;
+    }
 
     if(copyIndex)
     {
@@ -210,29 +219,51 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
     renderInstance.clusterBboxes         = geometry.clusterBboxesBuffer.address;
     renderInstance.originalPositions     = geometry.positionsBuffer.address;
 
-    // animated gets its own copy
+
     RenderInstanceBuffers& renderInstanceBuffers = m_renderInstanceBuffers[i];
-    renderInstanceBuffers.positions =
-        res.createBuffer(sizeof(glm::vec3) * geometry.numVertices,
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-    renderInstanceBuffers.normals =
-        res.createBuffer(sizeof(glm::vec3) * geometry.numVertices,
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-    m_resourceUsageInfo.sceneMemBytes += renderInstanceBuffers.positions.info.range;
-    m_resourceUsageInfo.sceneMemBytes += renderInstanceBuffers.normals.info.range;
+    if(config.doAnimation)
+    {
+      // animated, each instance gets its own copy
+      renderInstanceBuffers.positions =
+          res.createBuffer(sizeof(glm::vec3) * geometry.numVertices,
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+      renderInstanceBuffers.normals =
+          res.createBuffer(sizeof(glm::vec3) * geometry.numVertices,
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-    // seed with original data
-    VkBufferCopy region;
-    region.dstOffset = 0;
-    region.size      = sizeof(glm::vec3) * geometry.numVertices;
-    region.srcOffset = 0;
-    vkCmdCopyBuffer(cmd, geometry.positionsBuffer.buffer, renderInstanceBuffers.positions.buffer, 1, &region);
+      m_resourceUsageInfo.sceneMemBytes += renderInstanceBuffers.positions.info.range;
+      m_resourceUsageInfo.sceneMemBytes += renderInstanceBuffers.normals.info.range;
 
-    vkCmdFillBuffer(cmd, renderInstanceBuffers.normals.buffer, 0, renderInstanceBuffers.normals.info.range, 0);
+      // seed with original data
+      VkBufferCopy region;
+      region.dstOffset = 0;
+      region.size      = sizeof(glm::vec3) * geometry.numVertices;
+      region.srcOffset = 0;
+      vkCmdCopyBuffer(cmd, geometry.positionsBuffer.buffer, renderInstanceBuffers.positions.buffer, 1, &region);
 
-    renderInstance.positions = renderInstanceBuffers.positions.address;
-    renderInstance.normals   = renderInstanceBuffers.normals.address;
+      vkCmdFillBuffer(cmd, renderInstanceBuffers.normals.buffer, 0, renderInstanceBuffers.normals.info.range, 0);
+
+      renderInstance.positions = renderInstanceBuffers.positions.address;
+      renderInstance.normals   = renderInstanceBuffers.normals.address;
+    }
+    else if(isFirstInstance)
+    {
+      // first instance for a geometry will allocate a normal buffer, that all other instances will share
+      renderInstanceBuffers.normals =
+          res.createBuffer(sizeof(glm::vec3) * geometry.numVertices,
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+
+      m_resourceUsageInfo.sceneMemBytes += renderInstanceBuffers.normals.info.range;
+
+      renderInstance.positions = geometry.positionsBuffer.address;
+      renderInstance.normals   = renderInstanceBuffers.normals.address;
+    }
+    else
+    {
+      renderInstance.positions = geometry.positionsBuffer.address;
+      renderInstance.normals   = m_renderInstanceBuffers[m_geometryFirstInstance[geometryID]].normals.address;
+    }
   }
   res.tempSyncSubmit(cmd);
 
@@ -253,6 +284,11 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
 
     for(size_t i = 0; i < m_renderInstances.size(); i++)
     {
+      // without animation, only a subset of instances would have unique normals
+
+      if(!m_renderInstanceBuffers[i].normals.buffer)
+        continue;
+
       constants.instanceIndex = uint32_t(i);
       m_animDispatcher.dispatchThreads(cmd, m_renderInstances[i].numTriangles, &constants, nvvk::DispatcherBarrier::eTransfer,
                                        nvvk::DispatcherBarrier::eNone, ANIMATION_WORKGROUP_SIZE, 1);
@@ -361,7 +397,8 @@ void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererCo
 
   // Create a buffer holding the actual instance data (matrices++) for use by the AS builder
   m_tlasInstancesBuffer = res.createBuffer(tlasInstances.size() * sizeof(VkAccelerationStructureInstanceKHR),
-                                           VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+                                           VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                               | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   m_resourceUsageInfo.rtOtherMemBytes += tlasInstances.size() * sizeof(VkAccelerationStructureInstanceKHR);
   res.simpleUploadBuffer(m_tlasInstancesBuffer, tlasInstances.data());
   res.tempResetResources();
@@ -399,7 +436,8 @@ void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererCo
   m_tlas = res.createAccelKHR(createInfo);
   m_resourceUsageInfo.rtTlasMemBytes += createInfo.size;
   // Allocate the scratch memory
-  m_tlasScratchBuffer = res.createBuffer(sizeInfo.buildScratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  m_tlasScratchBuffer = res.createBuffer(sizeInfo.buildScratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                                        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
   m_resourceUsageInfo.rtOtherMemBytes += sizeInfo.buildScratchSize;
 
   // Update build information
