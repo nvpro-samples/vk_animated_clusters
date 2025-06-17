@@ -34,6 +34,8 @@ struct SceneConfig
   float clusterNvUnderfill = 1.0f;
   // Cost penalty for overlapping bounding boxes
   float clusterNvOverlap = 0.5f;
+  // Weighting for SaH vs full cluster
+  float clusterMeshoptSpatialFill = 0.5f;
 
   bool clusterDedicatedVertices = false;
   bool clusterStripify          = true;

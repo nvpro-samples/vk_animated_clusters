@@ -203,6 +203,9 @@ bool Scene::buildClusters()
   auto fnProcessGeometry = [&](uint64_t g, uint32_t threadOuterIndex) {
     Geometry& geom = m_geometries[g];
 
+    if(!geom.numTriangles)
+      return;
+
     if(m_config.clusterNvLibrary)
     {
       std::vector<nvcluster::AABB> triangleAABBs(geom.numTriangles);
@@ -504,14 +507,12 @@ bool Scene::buildClusters()
       geom.clusterLocalTriangles.resize(meshlets.size() * m_config.clusterTriangles * 3);
       geom.clusterLocalVertices.resize(meshlets.size() * m_config.clusterVertices);
 
-      const float coneWeight  = -1.f;  // use axis aligned metrics
-      const float splitFactor = 2.f;   // limit disconnected clusters
-
-      size_t numClusters = meshopt_buildMeshletsFlex(meshlets.data(), geom.clusterLocalVertices.data(),
-                                                     geom.clusterLocalTriangles.data(), (uint32_t*)geom.triangles.data(),
-                                                     geom.triangles.size() * 3, (float*)geom.positions.data(), geom.numVertices,
-                                                     sizeof(glm::vec3), std::min(255u, m_config.clusterVertices),
-                                                     minTriangles, m_config.clusterTriangles, coneWeight, splitFactor);
+      size_t numClusters =
+          meshopt_buildMeshletsSpatial(meshlets.data(), geom.clusterLocalVertices.data(),
+                                       geom.clusterLocalTriangles.data(), (uint32_t*)geom.triangles.data(),
+                                       geom.triangles.size() * 3, (float*)geom.positions.data(), geom.numVertices,
+                                       sizeof(glm::vec3), std::min(255u, m_config.clusterVertices), minTriangles,
+                                       m_config.clusterTriangles, m_config.clusterMeshoptSpatialFill);
 
       geom.numClusters = uint32_t(numClusters);
 

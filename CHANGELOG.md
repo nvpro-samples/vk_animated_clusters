@@ -1,4 +1,6 @@
 # Changelog for vk_animated_clusters
+* 2025/6/17:
+  * Updated `meshoptimizer` library to `v 0.24` using `meshopt_buildMeshletsSpatial` for improved ray tracing clusterization.
 * 2025/5/28:
   * Reduce memory consumption when animation is disabled: allocate normals, clas and blas only once per unique geometry.
 * 2025/4/30:

@@ -201,12 +201,18 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
               [&]() { return m_ui.enumCombobox(GUI_MESHLET, "##HiddenID", &m_tweak.clusterConfig); });
     PE::Checkbox("Use NV cluster library", &m_sceneConfig.clusterNvLibrary,
                  "uses the nv_cluster_builder library, otherwise meshoptimizer");
+    ImGui::BeginDisabled(!m_sceneConfig.clusterNvLibrary);
     PE::InputFloat("NV graph weight", &m_sceneConfig.clusterNvGraphWeight, 0.01f, 0.01f, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue,
                    "non-zero weight makes use of triangle connectivity, otherwise disabled");
     PE::InputFloat("NV cost underfill", &m_sceneConfig.clusterNvUnderfill, 0.01f, 0.01f, "%.3f",
                    ImGuiInputTextFlags_EnterReturnsTrue, "cost to underfilling a cluster");
     PE::InputFloat("NV cost overlap", &m_sceneConfig.clusterNvOverlap, 0.01f, 0.01f, "%.3f",
                    ImGuiInputTextFlags_EnterReturnsTrue, "cost to bounding box overlap between clusters");
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(m_sceneConfig.clusterNvLibrary);
+    PE::InputFloat("Meshopt fill weight", &m_sceneConfig.clusterMeshoptSpatialFill, 0.01f, 0.01f, "%.3f",
+                   ImGuiInputTextFlags_EnterReturnsTrue, "Bias full vs SaH optimal clusters");
+    ImGui::EndDisabled();
     PE::Checkbox("Optimize for triangle strips", &m_sceneConfig.clusterStripify,
                  "Re-order triangles within cluster optimizing for triangle strips");
     PE::Checkbox("Cluster-dedicated vertices", &m_sceneConfig.clusterDedicatedVertices,
