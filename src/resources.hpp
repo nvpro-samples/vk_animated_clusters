@@ -34,6 +34,10 @@
 #include <nvvk/profiler_vk.hpp>
 #include <nvvkglsl/glsl.hpp>
 
+#if VK_HEADER_VERSION < 309
+#error Update Vulkan SDK >= 1.4.309.0
+#endif
+
 #include "hbao_pass.hpp"
 #include "../shaders/shaderio.h"
 
