@@ -17,56 +17,153 @@
 * SPDX-License-Identifier: Apache-2.0
 */
 
+#include <cassert>
+
 #include <meshoptimizer.h>
 #include <nvcluster/nvcluster_storage.hpp>
-#include <nvh/parallel_work.hpp>
+#include <nvutils/parallel_work.hpp>
 
 #include "scene.hpp"
 
 namespace animatedclusters {
 
-bool Scene::init(const char* filename, Resources& res, const SceneConfig& config)
+void Scene::ProcessingInfo::init(float processingThreadsPct)
+{
+  numPoolThreadsOriginal = nvutils::get_thread_pool().get_thread_count();
+
+  numPoolThreads = numPoolThreadsOriginal;
+  if(processingThreadsPct > 0.0f && processingThreadsPct < 1.0f)
+  {
+    numPoolThreads = std::min(numPoolThreadsOriginal,
+                              std::max(1u, uint32_t(ceilf(float(numPoolThreadsOriginal) * processingThreadsPct))));
+
+    if(numPoolThreads != numPoolThreadsOriginal)
+      nvutils::get_thread_pool().reset(numPoolThreads);
+  }
+}
+
+void Scene::ProcessingInfo::setupParallelism(size_t geometryCount_)
+{
+  geometryCount = geometryCount_;
+
+  bool preferInnerParallelism = geometryCount < numPoolThreads;
+
+  numOuterThreads = preferInnerParallelism ? 1 : numPoolThreads;
+  numInnerThreads = preferInnerParallelism ? numPoolThreads : 1;
+
+  nvcluster_ContextCreateInfo clusterContextInfo;
+  clusterContextInfo.parallelize = preferInnerParallelism ? 1 : 0;
+  nvclusterCreateContext(&clusterContextInfo, &clusterContext);
+}
+
+void Scene::ProcessingInfo::logBegin()
+{
+  LOGI("... geometry load & processing: geometries %llu, threads outer %d inner %d\n", geometryCount, numOuterThreads, numInnerThreads);
+
+  startTime = clock.getMicroseconds();
+}
+
+void Scene::ProcessingInfo::logCompletedGeometry()
+{
+  std::lock_guard lock(progressMutex);
+
+  progressGeometriesCompleted++;
+
+  // statistics
+  const uint32_t precentageGranularity = 5;
+  uint32_t       percentage            = uint32_t(size_t(progressGeometriesCompleted * 100) / geometryCount);
+  percentage                           = (percentage / precentageGranularity) * precentageGranularity;
+
+  if(percentage > progressLastPercentage)
+  {
+    progressLastPercentage = percentage;
+    LOGI("... geometry load & processing: %3d%%\n", percentage);
+  }
+}
+
+void Scene::ProcessingInfo::logEnd()
+{
+  double endTime = clock.getMicroseconds();
+
+  LOGI("... geometry load & processing: %f milliseconds\n", (endTime - startTime) / 1000.0f);
+}
+
+void Scene::ProcessingInfo::deinit()
+{
+  if(clusterContext)
+    nvclusterDestroyContext(clusterContext);
+
+  if(numPoolThreads != numPoolThreadsOriginal)
+    nvutils::get_thread_pool().reset(numPoolThreadsOriginal);
+}
+bool Scene::init(const std::filesystem::path& filePath, const SceneConfig& config, Resources& res)
 {
   m_config = config;
 
-  if(!loadGLTF(filename))
+  m_clusterTriangleHistogram.resize(m_config.clusterTriangles + 1, 0);
+  m_clusterVertexHistogram.resize(m_config.clusterVertices + 1, 0);
+
+  ProcessingInfo processingInfo;
+  processingInfo.init(config.processingThreadsPct);
+
+  if(!loadGLTF(processingInfo, filePath))
   {
     return false;
   }
 
-  computeBBoxes();
+  processingInfo.deinit();
 
-  if(!buildClusters())
+  m_clusterTriangleHistogramMax = 0u;
+  m_clusterVertexHistogramMax   = 0u;
+  for(size_t i = 0; i < m_clusterTriangleHistogram.size(); i++)
   {
-    return false;
+    m_clusterTriangleHistogramMax = std::max(m_clusterTriangleHistogramMax, m_clusterTriangleHistogram[i]);
+    if(m_clusterTriangleHistogram[i])
+      m_maxClusterTriangles = uint32_t(i);
+  }
+  for(size_t i = 0; i < m_clusterVertexHistogram.size(); i++)
+  {
+    m_clusterVertexHistogramMax = std::max(m_clusterVertexHistogramMax, m_clusterVertexHistogram[i]);
+    if(m_clusterVertexHistogram[i])
+      m_maxClusterVertices = uint32_t(i);
   }
 
-  for(auto& geom : m_geometries)
+  if(m_config.clusterStripify && (processingInfo.numTotalStrips > 0))
   {
-    m_maxPerGeometryTriangles = std::max(m_maxPerGeometryTriangles, geom.numTriangles);
-    m_maxPerGeometryVertices  = std::max(m_maxPerGeometryVertices, geom.numVertices);
-    m_numTriangles += geom.numTriangles;
+    LOGI("Average triangles per strip %.2f\n", double(processingInfo.numTotalTriangles) / double(processingInfo.numTotalStrips));
   }
 
-  upload(res);
+  computeInstanceBBoxes();
+
+  for(auto& geometry : m_geometries)
+  {
+    m_maxPerGeometryTriangles       = std::max(m_maxPerGeometryTriangles, geometry.numTriangles);
+    m_maxPerGeometryVertices        = std::max(m_maxPerGeometryVertices, geometry.numVertices);
+    m_maxPerGeometryClusters        = std::max(m_maxPerGeometryClusters, geometry.numClusters);
+    m_maxPerGeometryClusterVertices = std::max(m_maxPerGeometryClusterVertices, geometry.numClusterVertices);
+    m_numTriangles += geometry.numTriangles;
+    m_numClusters += geometry.numClusters;
+  }
+
+  initGpuBuffers(res);
 
   return true;
 }
 
 void Scene::deinit(Resources& res)
 {
-  for(auto& geom : m_geometries)
+  for(auto& geometry : m_geometries)
   {
-    res.destroy(geom.positionsBuffer);
-    res.destroy(geom.trianglesBuffer);
-    res.destroy(geom.clustersBuffer);
-    res.destroy(geom.clusterLocalTrianglesBuffer);
-    res.destroy(geom.clusterLocalVerticesBuffer);
-    res.destroy(geom.clusterBboxesBuffer);
+    res.m_allocator.destroyBuffer(geometry.positionsBuffer);
+    res.m_allocator.destroyBuffer(geometry.trianglesBuffer);
+    res.m_allocator.destroyBuffer(geometry.clustersBuffer);
+    res.m_allocator.destroyBuffer(geometry.clusterLocalTrianglesBuffer);
+    res.m_allocator.destroyBuffer(geometry.clusterLocalVerticesBuffer);
+    res.m_allocator.destroyBuffer(geometry.clusterBboxesBuffer);
   }
 }
 
-void Scene::computeBBoxes()
+void Scene::computeInstanceBBoxes()
 {
   m_bbox = {{FLT_MAX, FLT_MAX, FLT_MAX}, {-FLT_MAX, -FLT_MAX, -FLT_MAX}};
 
@@ -74,7 +171,7 @@ void Scene::computeBBoxes()
   {
     assert(instance.geometryID <= m_geometries.size());
 
-    const Geometry& geom = m_geometries[instance.geometryID];
+    const Geometry& geometry = m_geometries[instance.geometryID];
 
     instance.bbox = {{FLT_MAX, FLT_MAX, FLT_MAX}, {-FLT_MAX, -FLT_MAX, -FLT_MAX}};
 
@@ -85,7 +182,7 @@ void Scene::computeBBoxes()
       bool z = (v & 4) != 0;
 
       glm::bvec3 weight(x, y, z);
-      glm::vec3  corner = glm::mix(geom.bbox.lo, geom.bbox.hi, weight);
+      glm::vec3  corner = glm::mix(geometry.bbox.lo, geometry.bbox.hi, weight);
       corner            = instance.matrix * glm::vec4(corner, 1.0f);
       instance.bbox.lo  = glm::min(instance.bbox.lo, corner);
       instance.bbox.hi  = glm::max(instance.bbox.hi, corner);
@@ -96,650 +193,509 @@ void Scene::computeBBoxes()
   }
 }
 
-void Scene::upload(Resources& res)
+void Scene::initGpuBuffers(Resources& res)
 {
   m_sceneClusterMemBytes  = 0;
   m_sceneTriangleMemBytes = 0;
 
   Resources::BatchedUploader uploader(res);
 
-  // not exactly efficient upload ;)
-  for(auto& geom : m_geometries)
+  for(auto& geometry : m_geometries)
   {
-    if(geom.positions.size())
+    if(geometry.positions.size())
     {
-      geom.positionsBuffer = res.createBuffer(sizeof(glm::vec3) * geom.positions.size(),
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
-                                                  | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+      res.m_allocator.createBuffer(geometry.positionsBuffer, sizeof(glm::vec3) * geometry.positions.size(),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+      NVVK_DBG_NAME(geometry.positionsBuffer.buffer);
 
-      uploader.uploadBuffer(geom.positionsBuffer, geom.positions.data());
+      uploader.uploadBuffer(geometry.positionsBuffer, geometry.positions.data());
 
-      m_sceneClusterMemBytes += geom.positionsBuffer.info.range;
-      m_sceneTriangleMemBytes += geom.positionsBuffer.info.range;
+      m_sceneClusterMemBytes += geometry.positionsBuffer.bufferSize;
+      m_sceneTriangleMemBytes += geometry.positionsBuffer.bufferSize;
     }
-    if(geom.triangles.size())
+    if(geometry.triangles.size())
     {
-      geom.trianglesBuffer = res.createBuffer(sizeof(glm::uvec3) * geom.triangles.size(),
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                                                  | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-      uploader.uploadBuffer(geom.trianglesBuffer, geom.triangles.data());
+      res.m_allocator.createBuffer(geometry.trianglesBuffer, sizeof(glm::uvec3) * geometry.triangles.size(),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+      NVVK_DBG_NAME(geometry.trianglesBuffer.buffer);
+
+      uploader.uploadBuffer(geometry.trianglesBuffer, geometry.triangles.data());
 
       // animation still needs triangles for normals, even if clusters are used
-      m_sceneClusterMemBytes += geom.trianglesBuffer.info.range;
-      m_sceneTriangleMemBytes += geom.trianglesBuffer.info.range;
+      m_sceneClusterMemBytes += geometry.trianglesBuffer.bufferSize;
+      m_sceneTriangleMemBytes += geometry.trianglesBuffer.bufferSize;
     }
-    if(geom.clusters.size())
+    if(geometry.clusters.size())
     {
-      geom.clustersBuffer = res.createBuffer(sizeof(shaderio::Cluster) * geom.clusters.size(),
-                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                 | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-      uploader.uploadBuffer(geom.clustersBuffer, geom.clusters.data());
+      res.m_allocator.createBuffer(geometry.clustersBuffer, sizeof(shaderio::Cluster) * geometry.clusters.size(),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+      NVVK_DBG_NAME(geometry.clustersBuffer.buffer);
 
-      m_sceneClusterMemBytes += geom.clustersBuffer.info.range;
+      uploader.uploadBuffer(geometry.clustersBuffer, geometry.clusters.data());
+
+      m_sceneClusterMemBytes += geometry.clustersBuffer.bufferSize;
     }
-    if(geom.clusterLocalTriangles.size())
+    if(geometry.clusterLocalTriangles.size())
     {
-      geom.clusterLocalTrianglesBuffer =
-          res.createBuffer(sizeof(uint8_t) * geom.clusterLocalTriangles.size(),
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-      uploader.uploadBuffer(geom.clusterLocalTrianglesBuffer, geom.clusterLocalTriangles.data());
+      res.m_allocator.createBuffer(
+          geometry.clusterLocalTrianglesBuffer, sizeof(uint8_t) * geometry.clusterLocalTriangles.size(),
+          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+      NVVK_DBG_NAME(geometry.clusterLocalTrianglesBuffer.buffer);
 
-      m_sceneClusterMemBytes += geom.clusterLocalTrianglesBuffer.info.range;
+      uploader.uploadBuffer(geometry.clusterLocalTrianglesBuffer, geometry.clusterLocalTriangles.data());
+
+      m_sceneClusterMemBytes += geometry.clusterLocalTrianglesBuffer.bufferSize;
     }
-    if(geom.clusterLocalVertices.size() && !m_config.clusterDedicatedVertices)
+    if(geometry.clusterLocalVertices.size() && !m_config.clusterDedicatedVertices)
     {
-      geom.clusterLocalVerticesBuffer =
-          res.createBuffer(sizeof(uint32_t) * geom.clusterLocalVertices.size(),
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-      uploader.uploadBuffer(geom.clusterLocalVerticesBuffer, geom.clusterLocalVertices.data());
+      res.m_allocator.createBuffer(geometry.clusterLocalVerticesBuffer, sizeof(uint32_t) * geometry.clusterLocalVertices.size(),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+      NVVK_DBG_NAME(geometry.clusterLocalVerticesBuffer.buffer);
 
-      m_sceneClusterMemBytes += geom.clusterLocalVerticesBuffer.info.range;
+      uploader.uploadBuffer(geometry.clusterLocalVerticesBuffer, geometry.clusterLocalVertices.data());
+
+      m_sceneClusterMemBytes += geometry.clusterLocalVerticesBuffer.bufferSize;
     }
-    if(geom.clusterBboxes.size())
+    if(geometry.clusterBboxes.size())
     {
-      geom.clusterBboxesBuffer =
-          res.createBuffer(sizeof(shaderio::BBox) * geom.clusterBboxes.size(),
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-      uploader.uploadBuffer(geom.clusterBboxesBuffer, geom.clusterBboxes.data());
+      res.m_allocator.createBuffer(geometry.clusterBboxesBuffer, sizeof(shaderio::BBox) * geometry.clusterBboxes.size(),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+      NVVK_DBG_NAME(geometry.clusterBboxesBuffer.buffer);
 
-      m_sceneClusterMemBytes += geom.clusterBboxesBuffer.info.range;
+      uploader.uploadBuffer(geometry.clusterBboxesBuffer, geometry.clusterBboxes.data());
+
+      m_sceneClusterMemBytes += geometry.clusterBboxesBuffer.bufferSize;
     }
   }
 
   uploader.flush();
 }
 
-bool Scene::buildClusters()
+void Scene::processGeometry(ProcessingInfo& processingInfo, Geometry& geometry)
 {
-  nvh::Profiler::Clock clock;
-  double               startTime = clock.getMicroSeconds();
+  if(!geometry.numTriangles)
+    return;
 
-  uint32_t numThreads = nvh::get_thread_pool().get_thread_count();
+  buildGeometryClusters(processingInfo, geometry);
 
-  m_clusterTriangleHistogram.resize(m_config.clusterTriangles + 1, 0);
-  m_clusterVertexHistogram.resize((m_config.clusterTriangles * 3) + 1, 0);
+  if(!geometry.numClusters)
+    return;
 
-  nvcluster::Context           nvclusterContext;
-  nvcluster::ContextCreateInfo nvclusterContextCreateInfo;
-  nvcluster::Result            nvclusterResult = nvclusterCreateContext(&nvclusterContextCreateInfo, &nvclusterContext);
+  if(m_config.clusterStripify)
+  {
+    buildGeometryClusterStrips(processingInfo, geometry);
+  }
+
+  buildGeometryClusterBboxes(processingInfo, geometry);
+
+  if(m_config.clusterDedicatedVertices)
+  {
+    // give each cluster its own set of vertices, so require only
+    // the local cluster 8-bit triangle indices
+    buildGeometryClusterVertices(processingInfo, geometry);
+
+    // no longer need vertex indirection
+    geometry.clusterLocalVertices = std::vector<uint32_t>();
+  }
+
+  rebuildGeometryTriangles(processingInfo, geometry);
+}
+
+void Scene::buildGeometryClusters(ProcessingInfo& processingInfo, Geometry& geometry)
+{
+  uint32_t numInnerThreads = processingInfo.numInnerThreads;
 
   if(m_config.clusterNvLibrary)
   {
-    // the cluster library doesn't enforce limits
-    m_config.clusterVertices = 0;
-  }
+    std::vector<nvcluster_AABB> triangleAABBs(geometry.numTriangles);
+    std::vector<glm::vec3>      triangleCentroids(geometry.numTriangles);
 
-  std::vector<uint32_t> threadCacheEarly(numThreads * 256);
+    static_assert(std::atomic_uint32_t::is_always_lock_free && sizeof(uint32_t) == sizeof(std::atomic_uint32_t));
 
-  uint64_t numTotalTriangles = 0;
-  uint64_t numTotalStrips    = 0;
+    nvutils::parallel_batches_pooled(
+        geometry.numTriangles,
+        [&](uint64_t t, uint32_t threadInnerIdx) {
+          glm::uvec3 triangleIndices = geometry.triangles[t];
 
-  bool     preferInnerParallelism = m_geometries.size() < numThreads * 2;
-  uint32_t numOuterThreads        = preferInnerParallelism ? 1 : numThreads;
-  uint32_t numInnerThreads        = preferInnerParallelism ? numThreads : 1;
+          glm::vec3 vertexA = geometry.positions[triangleIndices.x];
+          glm::vec3 vertexB = geometry.positions[triangleIndices.y];
+          glm::vec3 vertexC = geometry.positions[triangleIndices.z];
 
-  bool fatalError = false;
+          glm::vec3 lo = vertexA;
+          glm::vec3 hi = vertexA;
 
-  auto fnProcessGeometry = [&](uint64_t g, uint32_t threadOuterIndex) {
-    Geometry& geom = m_geometries[g];
+          lo = glm::min(lo, vertexB);
+          lo = glm::min(lo, vertexC);
 
-    if(!geom.numTriangles)
-      return;
+          hi = glm::max(hi, vertexB);
+          hi = glm::max(hi, vertexC);
 
-    if(m_config.clusterNvLibrary)
+          triangleAABBs[t].bboxMin[0] = lo.x;
+          triangleAABBs[t].bboxMin[1] = lo.y;
+          triangleAABBs[t].bboxMin[2] = lo.z;
+          triangleAABBs[t].bboxMax[0] = hi.x;
+          triangleAABBs[t].bboxMax[1] = hi.y;
+          triangleAABBs[t].bboxMax[2] = hi.z;
+
+          triangleCentroids[t] = (lo + hi) * 0.5f;
+        },
+        numInnerThreads);
+
+    nvcluster_Input input;
+    input.itemCount         = geometry.numTriangles;
+    input.itemBoundingBoxes = triangleAABBs.data();
+    input.itemCentroids     = reinterpret_cast<const nvcluster_Vec3f*>(triangleCentroids.data());
+
+    nvcluster_Config config = m_config.clusterNvConfig;
+    config.maxClusterSize   = m_config.clusterTriangles;
+
+    bool useVertexLimit = m_config.clusterVertices < m_config.clusterTriangles * 3;
+    if(useVertexLimit)
     {
-      std::vector<nvcluster::AABB> triangleAABBs(geom.numTriangles);
-      std::vector<glm::vec3>       triangleCentroids(geom.numTriangles);
+      config.itemVertexCount    = 3;
+      config.maxClusterVertices = m_config.clusterVertices;
 
-      std::vector<nvcluster::Range> vertexTriangleRanges(geom.numVertices + 1, {0, 0});
-      std::vector<uint32_t>         vertexTriangles;
+      input.itemVertices = reinterpret_cast<const uint32_t*>(geometry.triangles.data());
+      input.vertexCount  = geometry.numVertices;
+    }
 
-      std::vector<nvcluster::Range> triangleConnectionRanges(geom.numTriangles);
-      std::vector<float>            triangleConnectionWeights;
-      std::vector<uint32_t>         triangleConnectionTargets;
+    nvcluster::ClusterStorage storage;
+    nvcluster_Result nvclusterResult = nvcluster::generateClusters(processingInfo.clusterContext, config, input, storage);
+    assert(nvclusterResult == NVCLUSTER_SUCCESS);
 
-      static_assert(std::atomic_uint32_t::is_always_lock_free && sizeof(uint32_t) == sizeof(std::atomic_uint32_t));
+    size_t numClusters   = storage.clusterItemRanges.size();
+    geometry.numClusters = uint32_t(numClusters);
 
-      nvh::parallel_batches_indexed(
-          geom.numTriangles,
-          [&](uint64_t t, uint32_t threadIdx) {
-            glm::uvec3 triangleIndices = geom.triangles[t];
+    if(numClusters)
+    {
+      geometry.clusterLocalTriangles.resize(geometry.numTriangles * 3);
+      geometry.clusterLocalVertices.resize(geometry.numTriangles * 3);
+      geometry.clusters.resize(numClusters);
 
-            glm::vec3 vertexA = geom.positions[triangleIndices.x];
-            glm::vec3 vertexB = geom.positions[triangleIndices.y];
-            glm::vec3 vertexC = geom.positions[triangleIndices.z];
+      // linearize triangle offsets
+      uint32_t firstLocalTriangleOffset = 0;
+      for(size_t c = 0; c < numClusters; c++)
+      {
+        shaderio::Cluster& cluster = geometry.clusters[c];
+        cluster.numTriangles       = storage.clusterItemRanges[c].count;
+        cluster.firstLocalTriangle = firstLocalTriangleOffset;
+        firstLocalTriangleOffset += cluster.numTriangles * 3;
 
-            glm::vec3 lo = vertexA;
-            glm::vec3 hi = vertexA;
+        assert(cluster.numVertices <= m_config.clusterTriangles);
+      }
 
-            lo = glm::min(lo, vertexB);
-            lo = glm::min(lo, vertexC);
+      std::vector<uint32_t> threadCacheEarly(numInnerThreads * 256 * 2);
 
-            hi = glm::max(hi, vertexB);
-            hi = glm::max(hi, vertexC);
+      // fill clusters
+      nvutils::parallel_batches_pooled(
+          numClusters,
+          [&](uint64_t idx, uint32_t threadInnerIdx) {
+            shaderio::Cluster& cluster      = geometry.clusters[idx];
+            nvcluster_Range    clusterRange = storage.clusterItemRanges[idx];
 
-            triangleAABBs[t].bboxMin[0] = lo.x;
-            triangleAABBs[t].bboxMin[1] = lo.y;
-            triangleAABBs[t].bboxMin[2] = lo.z;
-            triangleAABBs[t].bboxMax[0] = hi.x;
-            triangleAABBs[t].bboxMax[1] = hi.y;
-            triangleAABBs[t].bboxMax[2] = hi.z;
+            uint8_t*  localTriangles        = &geometry.clusterLocalTriangles[cluster.firstLocalTriangle];
+            uint32_t* localVertices         = &geometry.clusterLocalVertices[cluster.firstLocalTriangle];
+            uint32_t* localItems            = &storage.items[clusterRange.offset];
+            uint32_t* vertexCacheEarlyValue = &threadCacheEarly[threadInnerIdx * 256 * 2];
+            uint32_t* vertexCacheEarlyPos   = vertexCacheEarlyValue + 256;
+            memset(vertexCacheEarlyValue, ~0, sizeof(uint32_t) * 256);
 
-            triangleCentroids[t] = (lo + hi) * 0.5f;
+            uint32_t numVertices = 0;
+            uint32_t numIndices  = 0;
 
-            reinterpret_cast<std::atomic_uint32_t&>(vertexTriangleRanges[triangleIndices.x].count)++;
-            reinterpret_cast<std::atomic_uint32_t&>(vertexTriangleRanges[triangleIndices.y].count)++;
-            reinterpret_cast<std::atomic_uint32_t&>(vertexTriangleRanges[triangleIndices.z].count)++;
+            for(uint32_t t = 0; t < cluster.numTriangles; t++)
+            {
+              glm::uvec3 triangleIndices = geometry.triangles[localItems[t]];
+              for(uint32_t k = 0; k < 3; k++)
+              {
+                uint32_t vertexIndex = triangleIndices[k];
+                bool     found       = false;
+
+                // quick early out
+                if(vertexCacheEarlyValue[vertexIndex & 0xFF] == vertexIndex)
+                {
+                  localTriangles[numIndices++] = uint8_t(vertexCacheEarlyPos[vertexIndex & 0xFF]);
+                  continue;
+                }
+                // otherwise search list in detail
+                for(uint32_t v = 0; v < numVertices; v++)
+                {
+                  if(localVertices[v] == vertexIndex)
+                  {
+                    found                        = true;
+                    localTriangles[numIndices++] = uint8_t(v);
+                    break;
+                  }
+                }
+
+                if(!found)
+                {
+                  vertexCacheEarlyValue[vertexIndex & 0xFF] = vertexIndex;
+                  vertexCacheEarlyPos[vertexIndex & 0xFF]   = numVertices;
+
+                  localTriangles[numIndices++] = numVertices;
+                  localVertices[numVertices++] = vertexIndex;
+                }
+              }
+            }
+            assert(numIndices == cluster.numTriangles * 3);
+
+            cluster.numVertices = numVertices;
+
+            assert(cluster.numVertices <= m_config.clusterVertices);
+
+            // update stats
+            reinterpret_cast<std::atomic_uint32_t*>(m_clusterTriangleHistogram.data())[cluster.numTriangles]++;
+            reinterpret_cast<std::atomic_uint32_t*>(m_clusterVertexHistogram.data())[cluster.numVertices]++;
           },
           numInnerThreads);
 
-      // build graph
-      if(m_config.clusterNvGraphWeight)
+      // compact local vertices
+      uint32_t writeOffset = 0;
+      for(size_t c = 0; c < numClusters; c++)
       {
-        // compute triangle worst-case connections
-        nvh::parallel_batches_indexed(
-            geom.numTriangles,
-            [&](uint64_t idx, uint32_t threadIdx) {
-              glm::uvec3 triangleIndices = geom.triangles[idx];
-              // subtract ourselves from each list
-              // note triangles with shared edges will still appear in multiple vertex lists
-              // hence this is conservative
-              triangleConnectionRanges[idx].count = vertexTriangleRanges[triangleIndices.x].count
-                                                    + vertexTriangleRanges[triangleIndices.y].count
-                                                    + vertexTriangleRanges[triangleIndices.z].count - 3;
-            },
-            numInnerThreads);
+        shaderio::Cluster& cluster = geometry.clusters[c];
+        cluster.firstLocalVertex   = writeOffset;
 
-        uint32_t offsetVertexTriangles = 0;
-        for(uint32_t v = 0; v < geom.numVertices; v++)
+        memmove(&geometry.clusterLocalVertices[writeOffset], &geometry.clusterLocalVertices[cluster.firstLocalTriangle],
+                sizeof(uint32_t) * cluster.numVertices);
+
+        writeOffset += uint32_t(cluster.numVertices);
+      }
+      geometry.clusterLocalVertices.resize(writeOffset);
+      geometry.clusterLocalVertices.shrink_to_fit();
+    }
+  }
+  else
+  {
+    // first sort for vcache
+    std::vector<glm::uvec3> triangles = geometry.triangles;
+    meshopt_optimizeVertexCache((uint32_t*)geometry.triangles.data(), (uint32_t*)triangles.data(), triangles.size() * 3,
+                                geometry.numVertices);
+
+    // we allow smaller clusters to be generated when that significantly improves their bounds
+    size_t minTriangles = (m_config.clusterTriangles / 4) & ~3;
+
+    std::vector<meshopt_Meshlet> meshlets(meshopt_buildMeshletsBound(geometry.numTriangles * 3, m_config.clusterVertices, minTriangles));
+    geometry.clusterLocalTriangles.resize(meshlets.size() * m_config.clusterTriangles * 3);
+    geometry.clusterLocalVertices.resize(meshlets.size() * m_config.clusterVertices);
+
+    size_t numClusters =
+        meshopt_buildMeshletsSpatial(meshlets.data(), geometry.clusterLocalVertices.data(),
+                                     geometry.clusterLocalTriangles.data(), (uint32_t*)geometry.triangles.data(),
+                                     geometry.triangles.size() * 3, (float*)geometry.positions.data(),
+                                     geometry.numVertices, sizeof(glm::vec3), std::min(255u, m_config.clusterVertices),
+                                     minTriangles, m_config.clusterTriangles, m_config.clusterMeshoptSpatialFill);
+
+    geometry.numClusters = uint32_t(numClusters);
+
+    if(geometry.numClusters)
+    {
+      geometry.clusters.resize(geometry.numClusters);
+      geometry.clusters.shrink_to_fit();
+
+      for(size_t c = 0; c < numClusters; c++)
+      {
+        meshopt_Meshlet&   meshlet = meshlets[c];
+        shaderio::Cluster& cluster = geometry.clusters[c];
+
+        cluster.numTriangles       = meshlet.triangle_count;
+        cluster.numVertices        = meshlet.vertex_count;
+        cluster.firstLocalTriangle = meshlet.triangle_offset;
+        cluster.firstLocalVertex   = meshlet.vertex_offset;
+
+        // update stats
+        reinterpret_cast<std::atomic_uint32_t*>(m_clusterTriangleHistogram.data())[cluster.numTriangles]++;
+        reinterpret_cast<std::atomic_uint32_t*>(m_clusterVertexHistogram.data())[cluster.numVertices]++;
+      }
+    }
+  }
+
+  if(geometry.numClusters)
+  {
+    shaderio::Cluster& cluster = geometry.clusters[geometry.numClusters - 1];
+    geometry.clusterLocalTriangles.resize(cluster.firstLocalTriangle + cluster.numTriangles * 3);
+    geometry.clusterLocalVertices.resize(cluster.firstLocalVertex + cluster.numVertices);
+    geometry.clusterLocalTriangles.shrink_to_fit();
+    geometry.clusterLocalVertices.shrink_to_fit();
+
+    geometry.numClusterVertices = uint32_t(geometry.clusterLocalVertices.size());
+  }
+}
+
+
+void Scene::buildGeometryClusterStrips(ProcessingInfo& processingInfo, Geometry& geometry)
+{
+  uint32_t numInnerThreads = processingInfo.numInnerThreads;
+
+  uint32_t numMaxTriangles  = m_config.clusterTriangles;
+  uint32_t perThreadIndices = numMaxTriangles * 3 * 2 + uint32_t(meshopt_stripifyBound(numMaxTriangles * 3));
+
+  std::atomic_uint32_t  numStrips = 0;
+  std::vector<uint32_t> threadIndices(numInnerThreads * perThreadIndices);
+
+  nvutils::parallel_ranges_pooled(
+      geometry.numClusters,
+      [&](uint64_t idxBegin, uint64_t idxEnd, uint32_t threadInnerIdx) {
+        for(uint64_t idx = idxBegin; idx < idxEnd; idx++)
         {
-          vertexTriangleRanges[v].offset = offsetVertexTriangles;
-          offsetVertexTriangles += vertexTriangleRanges[v].count;
-          vertexTriangleRanges[v].count = 0;
-        }
-        // just used as terminator to detect out of bounds
-        vertexTriangleRanges[geom.numVertices].offset = offsetVertexTriangles;
+          shaderio::Cluster& cluster = geometry.clusters[idx];
 
-        vertexTriangles.resize(offsetVertexTriangles);
+          uint32_t* meshletIndices      = &threadIndices[threadInnerIdx * perThreadIndices];
+          uint32_t* meshletOptim        = meshletIndices + cluster.numTriangles * 3;
+          uint32_t* meshletStripIndices = meshletOptim + cluster.numTriangles * 3;
 
-        uint32_t offsetTriangleConnections = 0;
-        for(uint32_t t = 0; t < geom.numTriangles; t++)
-        {
-          // setup offset of triangle connections based on conservative estimate
-          triangleConnectionRanges[t].offset = offsetTriangleConnections;
-          offsetTriangleConnections += triangleConnectionRanges[t].count;
-
-          // append triangle to vertex lists
-          glm::uvec3 triangleIndices = geom.triangles[t];
-          for(uint32_t k = 0; k < 3; k++)
+          // convert u8 to u32
+          for(uint32_t i = 0; i < uint32_t(cluster.numTriangles) * 3; i++)
           {
-            uint32_t          vertexIndex                             = triangleIndices[k];
-            nvcluster::Range& vertexRange                             = vertexTriangleRanges[vertexIndex];
-            vertexTriangles[vertexRange.offset + vertexRange.count++] = t;
-#ifdef _DEBUG
-            uint32_t maxCount = vertexTriangleRanges[vertexIndex + 1].offset - vertexRange.offset;
-            assert(vertexRange.count <= maxCount);
-#endif
+            meshletIndices[i] = geometry.clusterLocalTriangles[cluster.firstLocalTriangle + i];
+          }
+
+          meshopt_optimizeVertexCache(meshletOptim, meshletIndices, cluster.numTriangles * 3, cluster.numVertices);
+          size_t stripIndexCount =
+              meshopt_stripify(meshletStripIndices, meshletOptim, cluster.numTriangles * 3, cluster.numVertices, ~0);
+          size_t newIndexCount = meshopt_unstripify(meshletIndices, meshletStripIndices, stripIndexCount, ~0);
+
+          cluster.numTriangles = uint32_t(newIndexCount / 3);
+
+          for(uint32_t i = 0; i < uint32_t(newIndexCount); i++)
+          {
+            geometry.clusterLocalTriangles[cluster.firstLocalTriangle + i] = uint8_t(meshletIndices[i]);
+          }
+
+          // just for stats
+          numStrips++;
+          for(uint32_t i = 1; i < uint32_t(cluster.numTriangles); i++)
+          {
+            const uint32_t* current = meshletIndices + i * 3;
+            const uint32_t* prev    = meshletIndices + (i - 1) * 3;
+
+            if(!((current[0] == prev[0] || current[0] == prev[2]) && (current[1] == prev[1] || current[1] == prev[2])))
+              numStrips++;
           }
         }
+      },
+      numInnerThreads);
 
-        triangleConnectionTargets.resize(offsetTriangleConnections);
-        triangleConnectionWeights.resize(offsetTriangleConnections);
+  processingInfo.numTotalTriangles += geometry.numTriangles;
+  processingInfo.numTotalStrips += numStrips;
+}
 
-        // compute accurate triangle connections
-        nvh::parallel_batches_indexed(
-            geom.numTriangles,
-            [&](uint64_t t, uint32_t threadInnerIdx) {
-              uint32_t threadIdx = preferInnerParallelism ? threadInnerIdx : threadOuterIndex;
+void Scene::buildGeometryClusterBboxes(ProcessingInfo& processingInfo, Geometry& geometry)
+{
+  geometry.clusterBboxes.resize(geometry.numClusters);
 
+  const glm::vec3* positions             = geometry.positions.data();
+  const uint32_t*  clusterLocalVertices  = geometry.clusterLocalVertices.data();
+  const uint8_t*   clusterLocalTriangles = geometry.clusterLocalTriangles.data();
 
-              glm::uvec3        triangleIndices = geom.triangles[t];
-              nvcluster::Range& triangleRange   = triangleConnectionRanges[t];
-
-              uint32_t* connectionTargets = &triangleConnectionTargets[triangleRange.offset];
-              float*    connectionWeights = &triangleConnectionWeights[triangleRange.offset];
-              uint32_t* connectionEarly   = &threadCacheEarly[threadIdx * 256];
-              memset(connectionEarly, ~0, sizeof(uint32_t) * 256);
-
-              uint32_t newCount = 0;
-              for(uint32_t k = 0; k < 3; k++)
-              {
-                uint32_t         vertexIndex            = triangleIndices[k];
-                nvcluster::Range vertexRange            = vertexTriangleRanges[vertexIndex];
-                const uint32_t*  currentVertexTriangles = &vertexTriangles[vertexRange.offset];
-                for(uint32_t vt = 0; vt < vertexRange.count; vt++)
-                {
-                  uint32_t vertexTriangle = currentVertexTriangles[vt];
-
-                  // ignore ourself
-                  // or if already in list (opportunistic check)
-                  if(vertexTriangle == uint32_t(t) || (connectionEarly[vertexTriangle & 0xFF] == vertexTriangle))
-                    continue;
-
-                  // otherwise search list in detail
-                  bool found = false;
-                  for(uint32_t t = 0; t < newCount; t++)
-                  {
-                    if(vertexTriangle == connectionTargets[t])
-                    {
-                      found = true;
-                      break;
-                    }
-                  }
-
-                  if(!found)
-                  {
-                    connectionEarly[vertexTriangle & 0xFF] = vertexTriangle;
-                    connectionTargets[newCount]            = vertexTriangle;
-                    connectionWeights[newCount]            = m_config.clusterNvGraphWeight;
-                    newCount++;
-                  }
-                }
-              }
-
-              assert(newCount <= triangleRange.count);
-              triangleRange.count = newCount;
-            },
-            numInnerThreads);
-      }
-
-      nvcluster::SpatialElements spatial;
-      spatial.boundingBoxes = triangleAABBs.data();
-      spatial.centroids     = reinterpret_cast<const float*>(triangleCentroids.data());
-      spatial.elementCount  = geom.numTriangles;
-
-      nvcluster::Graph graph;
-      if(m_config.clusterNvGraphWeight)
-      {
-        graph.connectionCount   = uint32_t(triangleConnectionTargets.size());
-        graph.connectionTargets = triangleConnectionTargets.data();
-        graph.connectionWeights = triangleConnectionWeights.data();
-        graph.nodeCount         = geom.numTriangles;
-        graph.nodes             = triangleConnectionRanges.data();
-      }
-
-      nvcluster::Input input;
-      input.config.costUnderfill  = m_config.clusterNvUnderfill;
-      input.config.costOverlap    = m_config.clusterNvOverlap;
-      input.config.maxClusterSize = m_config.clusterTriangles;
-      input.spatialElements       = &spatial;
-      input.graph                 = m_config.clusterNvGraphWeight ? &graph : nullptr;
-
-      nvcluster::ClusterStorage storage;
-      nvclusterResult = nvcluster::generateClusters(nvclusterContext, input, storage);
-
-      size_t numClusters = storage.clusterRanges.size();
-      geom.numClusters   = uint32_t(numClusters);
-
-      if(numClusters)
-      {
-        geom.clusterLocalTriangles.resize(geom.numTriangles * 3);
-        geom.clusterLocalVertices.resize(geom.numTriangles * 3);
-        geom.clusters.resize(numClusters);
-
-        // linearize triangle offsets
-        uint32_t firstLocalTriangleOffset = 0;
-        for(size_t c = 0; c < numClusters; c++)
+  nvutils::parallel_ranges_pooled(
+      geometry.numClusters,
+      [&](uint64_t idxBegin, uint64_t idxEnd, uint32_t threadInnerIdx) {
+        for(uint64_t idx = idxBegin; idx < idxEnd; idx++)
         {
-          shaderio::Cluster& cluster = geom.clusters[c];
-          cluster.numTriangles       = storage.clusterRanges[c].count;
-          cluster.firstLocalTriangle = firstLocalTriangleOffset;
-          firstLocalTriangleOffset += cluster.numTriangles * 3;
+          shaderio::Cluster& cluster = geometry.clusters[idx];
+
+          shaderio::BBox bbox = {{FLT_MAX, FLT_MAX, FLT_MAX}, {-FLT_MAX, -FLT_MAX, -FLT_MAX}};
+          for(uint32_t v = 0; v < cluster.numVertices; v++)
+          {
+            uint32_t  vertexIndex = clusterLocalVertices[cluster.firstLocalVertex + v];
+            glm::vec3 pos         = positions[vertexIndex];
+
+            bbox.lo = glm::min(bbox.lo, pos);
+            bbox.hi = glm::max(bbox.hi, pos);
+          }
+
+          geometry.clusterBboxes[idx] = bbox;
         }
+      },
+      processingInfo.numInnerThreads);
+}
 
-        // fill clusters
-        nvh::parallel_batches_indexed(
-            numClusters,
-            [&](uint64_t idx, uint32_t threadInnerIdx) {
-              uint32_t threadIdx = preferInnerParallelism ? threadInnerIdx : threadOuterIndex;
+void Scene::buildGeometryClusterVertices(ProcessingInfo& processingInfo, Geometry& geometry)
+{
+  // build per-cluster vertices
 
-              shaderio::Cluster& cluster      = geom.clusters[idx];
-              nvcluster::Range   clusterRange = storage.clusterRanges[idx];
+  std::vector<glm::vec3> oldPositionsData = std::move(geometry.positions);
 
-              uint8_t*  localTriangles   = &geom.clusterLocalTriangles[cluster.firstLocalTriangle];
-              uint32_t* localVertices    = &geom.clusterLocalVertices[cluster.firstLocalTriangle];
-              uint32_t* localItems       = &storage.clusterItems[clusterRange.offset];
-              uint32_t* vertexCacheEarly = &threadCacheEarly[threadIdx * 256];
-              memset(vertexCacheEarly, ~0, sizeof(uint32_t) * 256);
+  geometry.positions.resize(geometry.numClusterVertices);
+  geometry.numVertices = uint32_t(geometry.positions.size());
 
-              uint32_t numVertices = 0;
-              uint32_t numIndices  = 0;
+  const glm::vec3* oldPositions         = oldPositionsData.data();
+  glm::vec3*       newPositions         = geometry.positions.data();
+  uint32_t*        clusterLocalVertices = geometry.clusterLocalVertices.data();
 
-              for(uint32_t t = 0; t < cluster.numTriangles; t++)
-              {
-                glm::uvec3 triangleIndices = geom.triangles[localItems[t]];
-                for(uint32_t k = 0; k < 3; k++)
-                {
-                  uint32_t vertexIndex = triangleIndices[k];
-                  bool     found       = false;
+  for(uint32_t c = 0; c < geometry.numClusters; c++)
+  {
+    shaderio::Cluster& cluster = geometry.clusters[c];
 
-                  // quick early out
-                  // upper bits of full 32-bit vertex index
-                  // lower bits of slot in vertex cache
-                  uint32_t cacheEarlyValue = vertexCacheEarly[vertexIndex & 0xFF];
-                  if((cacheEarlyValue >> 8) == (vertexIndex >> 8))
-                  {
-                    localTriangles[numIndices++] = uint8_t(cacheEarlyValue & 0xFF);
-                    continue;
-                  }
-                  // otherwise search list in detail
-                  for(uint32_t v = 0; v < numVertices; v++)
-                  {
-                    if(localVertices[v] == vertexIndex)
-                    {
-                      found                        = true;
-                      localTriangles[numIndices++] = uint8_t(v);
-                      break;
-                    }
-                  }
-
-                  if(!found)
-                  {
-                    vertexCacheEarly[vertexIndex & 0xFF] = (vertexIndex & ~0xFF) | (numVertices & 0xFF);
-                    localTriangles[numIndices++]         = numVertices;
-                    localVertices[numVertices++]         = vertexIndex;
-                  }
-                }
-              }
-              assert(numIndices == cluster.numTriangles * 3);
-
-              assert(numVertices <= 255);
-              cluster.numVertices = numVertices;
-            },
-            numInnerThreads);
-
-        // compact local vertices
-        uint32_t writeOffset = 0;
-        for(size_t c = 0; c < numClusters; c++)
-        {
-          shaderio::Cluster& cluster = geom.clusters[c];
-          cluster.firstLocalVertex   = writeOffset;
-
-          memmove(&geom.clusterLocalVertices[writeOffset], &geom.clusterLocalVertices[cluster.firstLocalTriangle],
-                  sizeof(uint32_t) * cluster.numVertices);
-
-          // cluster library has no way to enforce vertex limit
-          m_config.clusterVertices = std::max(uint32_t(cluster.numVertices), m_config.clusterVertices);
-
-          writeOffset += uint32_t(cluster.numVertices);
-        }
-        geom.clusterLocalVertices.resize(writeOffset);
-        geom.clusterLocalVertices.shrink_to_fit();
-
-        if(m_config.clusterVertices > 256)
-        {
-          fatalError = true;
-          LOGE("FATAL ERROR: geometry %zu generated clusters beyond 256 limitation\n", g);
-          return;
-        }
-      }
-    }
-    else
+    for(uint32_t v = 0; v < cluster.numVertices; v++)
     {
-      // first sort for vcache
-      std::vector<glm::uvec3> triangles = geom.triangles;
-      meshopt_optimizeVertexCache((uint32_t*)geom.triangles.data(), (uint32_t*)triangles.data(), triangles.size() * 3, geom.numVertices);
-
-      // we allow smaller clusters to be generated when that significantly improves their bounds
-      size_t minTriangles = (m_config.clusterTriangles / 4) & ~3;
-
-      std::vector<meshopt_Meshlet> meshlets(meshopt_buildMeshletsBound(geom.numTriangles * 3, m_config.clusterVertices, minTriangles));
-      geom.clusterLocalTriangles.resize(meshlets.size() * m_config.clusterTriangles * 3);
-      geom.clusterLocalVertices.resize(meshlets.size() * m_config.clusterVertices);
-
-      size_t numClusters =
-          meshopt_buildMeshletsSpatial(meshlets.data(), geom.clusterLocalVertices.data(),
-                                       geom.clusterLocalTriangles.data(), (uint32_t*)geom.triangles.data(),
-                                       geom.triangles.size() * 3, (float*)geom.positions.data(), geom.numVertices,
-                                       sizeof(glm::vec3), std::min(255u, m_config.clusterVertices), minTriangles,
-                                       m_config.clusterTriangles, m_config.clusterMeshoptSpatialFill);
-
-      geom.numClusters = uint32_t(numClusters);
-
-      if(geom.numClusters)
-      {
-        geom.clusters.resize(geom.numClusters);
-        geom.clusters.shrink_to_fit();
-
-        for(size_t c = 0; c < numClusters; c++)
-        {
-          meshopt_Meshlet&   meshlet = meshlets[c];
-          shaderio::Cluster& cluster = geom.clusters[c];
-
-          cluster.numTriangles       = meshlet.triangle_count;
-          cluster.numVertices        = meshlet.vertex_count;
-          cluster.firstLocalTriangle = meshlet.triangle_offset;
-          cluster.firstLocalVertex   = meshlet.vertex_offset;
-        }
-      }
+      uint32_t oldIdx                                    = clusterLocalVertices[v + cluster.firstLocalVertex];
+      clusterLocalVertices[v + cluster.firstLocalVertex] = v + cluster.firstLocalVertex;
+      newPositions[v + cluster.firstLocalVertex]         = oldPositions[oldIdx];
     }
+  }
+}
 
-    if(geom.numClusters)
-    {
-      if(m_config.clusterStripify)
-      {
-        uint32_t numMaxTriangles  = m_config.clusterTriangles;
-        uint32_t perThreadIndices = numMaxTriangles * 3 * 2 + uint32_t(meshopt_stripifyBound(numMaxTriangles * 3));
+void Scene::rebuildGeometryTriangles(ProcessingInfo& processingInfo, Geometry& geometry)
+{
+  // rebuild triangle buffer accounting for cluster order
+  // in the rare event that cluster building filtered out original triangles
 
-        std::atomic_uint32_t  numStrips = 0;
-        std::vector<uint32_t> threadIndices(numInnerThreads * perThreadIndices);
+  uint32_t triOffset = 0;
+  for(size_t c = 0; c < geometry.numClusters; c++)
+  {
+    shaderio::Cluster& cluster = geometry.clusters[c];
 
-        nvh::parallel_ranges(
-            geom.numClusters,
-            [&](uint64_t idxBegin, uint64_t idxEnd, uint32_t threadIdx) {
-              for(uint64_t idx = idxBegin; idx < idxEnd; idx++)
-              {
-                shaderio::Cluster& cluster = geom.clusters[idx];
+    cluster.firstTriangle = triOffset;
+    triOffset += cluster.numTriangles;
+  }
 
-                uint32_t* meshletIndices      = &threadIndices[threadIdx * perThreadIndices];
-                uint32_t* meshletOptim        = meshletIndices + cluster.numTriangles * 3;
-                uint32_t* meshletStripIndices = meshletOptim + cluster.numTriangles * 3;
+  geometry.triangles.resize(triOffset);
+  geometry.numTriangles = triOffset;
 
-                // convert u8 to u32
-                for(uint32_t i = 0; i < uint32_t(cluster.numTriangles) * 3; i++)
-                {
-                  meshletIndices[i] = geom.clusterLocalTriangles[cluster.firstLocalTriangle + i];
-                }
+  glm::uvec3*     triangles             = geometry.triangles.data();
+  const uint32_t* clusterLocalVertices  = geometry.clusterLocalVertices.data();
+  const uint8_t*  clusterLocalTriangles = geometry.clusterLocalTriangles.data();
 
-                meshopt_optimizeVertexCache(meshletOptim, meshletIndices, cluster.numTriangles * 3, cluster.numVertices);
-                size_t stripIndexCount =
-                    meshopt_stripify(meshletStripIndices, meshletOptim, cluster.numTriangles * 3, cluster.numVertices, ~0);
-                size_t newIndexCount = meshopt_unstripify(meshletIndices, meshletStripIndices, stripIndexCount, ~0);
-
-                cluster.numTriangles = uint32_t(newIndexCount / 3);
-
-                for(uint32_t i = 0; i < uint32_t(newIndexCount); i++)
-                {
-                  geom.clusterLocalTriangles[cluster.firstLocalTriangle + i] = uint8_t(meshletIndices[i]);
-                }
-
-                // just for stats
-                numStrips++;
-                for(uint32_t i = 1; i < uint32_t(cluster.numTriangles); i++)
-                {
-                  const uint32_t* current = meshletIndices + i * 3;
-                  const uint32_t* prev    = meshletIndices + (i - 1) * 3;
-
-                  if(!((current[0] == prev[0] || current[0] == prev[2]) && (current[1] == prev[1] || current[1] == prev[2])))
-                    numStrips++;
-                }
-              }
-            },
-            numInnerThreads);
-
-
-        numTotalTriangles += geom.numTriangles;
-        numTotalStrips += numStrips;
-      }
-
-      if(m_config.clusterDedicatedVertices)
-      {
-        std::vector<glm::vec3> oldPositions = std::move(geom.positions);
-        geom.positions.resize(geom.clusterLocalVertices.size());
-        geom.numVertices = uint32_t(geom.positions.size());
-
-        nvh::parallel_ranges(
-            geom.numClusters,
-            [&](uint64_t idxBegin, uint64_t idxEnd, uint32_t threadIdx) {
-              for(uint64_t idx = idxBegin; idx < idxEnd; idx++)
-              {
-                shaderio::Cluster& cluster = geom.clusters[idx];
-
-                for(uint32_t v = 0; v < cluster.numVertices; v++)
-                {
-                  uint32_t newIndex                   = cluster.firstLocalVertex + v;
-                  uint32_t oldIndex                   = geom.clusterLocalVertices[newIndex];
-                  geom.positions[newIndex]            = oldPositions[oldIndex];
-                  geom.clusterLocalVertices[newIndex] = newIndex;
-                }
-              }
-            },
-            numInnerThreads);
-      }
-
-      // rebuild triangle buffer accounting for cluster order
-      {
-
-        uint32_t triOffset = 0;
-        for(size_t c = 0; c < geom.numClusters; c++)
+  nvutils::parallel_ranges_pooled(
+      geometry.numClusters,
+      [&](uint64_t idxBegin, uint64_t idxEnd, uint32_t threadInnerIdx) {
+        for(uint64_t idx = idxBegin; idx < idxEnd; idx++)
         {
-          shaderio::Cluster& cluster = geom.clusters[c];
+          shaderio::Cluster& cluster = geometry.clusters[idx];
 
-          cluster.firstTriangle = triOffset;
-          triOffset += cluster.numTriangles;
-          m_clusterTriangleHistogram[cluster.numTriangles]++;
-          m_clusterVertexHistogram[cluster.numVertices]++;
+          for(uint32_t t = 0; t < cluster.numTriangles; t++)
+          {
+            glm::uvec3 localVertices = {clusterLocalTriangles[cluster.firstLocalTriangle + t * 3 + 0],
+                                        clusterLocalTriangles[cluster.firstLocalTriangle + t * 3 + 1],
+                                        clusterLocalTriangles[cluster.firstLocalTriangle + t * 3 + 2]};
+
+            assert(localVertices.x < cluster.numVertices);
+            assert(localVertices.y < cluster.numVertices);
+            assert(localVertices.z < cluster.numVertices);
+
+            glm::uvec3 globalVertices = {localVertices.x + cluster.firstLocalVertex, localVertices.y + cluster.firstLocalVertex,
+                                         localVertices.z + cluster.firstLocalVertex};
+
+            if(!m_config.clusterDedicatedVertices)
+            {
+              // need one more indirection
+              globalVertices = {clusterLocalVertices[globalVertices.x], clusterLocalVertices[globalVertices.y],
+                                clusterLocalVertices[globalVertices.z]};
+            }
+
+            triangles[cluster.firstTriangle + t] = globalVertices;
+          }
         }
-
-        geom.triangles.resize(triOffset);
-        geom.numTriangles = triOffset;
-
-        glm::uvec3*     triangles             = geom.triangles.data();
-        const uint32_t* clusterLocalVertices  = geom.clusterLocalVertices.data();
-        const uint8_t*  clusterLocalTriangles = geom.clusterLocalTriangles.data();
-
-        nvh::parallel_ranges(
-            geom.numClusters,
-            [&](uint64_t idxBegin, uint64_t idxEnd, uint32_t threadIdx) {
-              for(uint64_t idx = idxBegin; idx < idxEnd; idx++)
-              {
-                shaderio::Cluster& cluster = geom.clusters[idx];
-
-                for(uint32_t t = 0; t < cluster.numTriangles; t++)
-                {
-                  glm::uvec3 localVertices = {clusterLocalTriangles[cluster.firstLocalTriangle + t * 3 + 0],
-                                              clusterLocalTriangles[cluster.firstLocalTriangle + t * 3 + 1],
-                                              clusterLocalTriangles[cluster.firstLocalTriangle + t * 3 + 2]};
-
-                  assert(localVertices.x < cluster.numVertices);
-                  assert(localVertices.y < cluster.numVertices);
-                  assert(localVertices.z < cluster.numVertices);
-
-                  glm::uvec3 globalVertices = {clusterLocalVertices[localVertices.x + cluster.firstLocalVertex],
-                                               clusterLocalVertices[localVertices.y + cluster.firstLocalVertex],
-                                               clusterLocalVertices[localVertices.z + cluster.firstLocalVertex]};
-
-                  triangles[cluster.firstTriangle + t] = globalVertices;
-                }
-              }
-            },
-            numInnerThreads);
-
-        shaderio::Cluster& cluster = geom.clusters[geom.numClusters - 1];
-        geom.clusterLocalTriangles.resize(cluster.firstLocalTriangle + cluster.numTriangles * 3);
-        geom.clusterLocalVertices.resize(cluster.firstLocalVertex + cluster.numVertices);
-        geom.clusterLocalTriangles.shrink_to_fit();
-        geom.clusterLocalVertices.shrink_to_fit();
-      }
-
-      // build bboxes
-      {
-        geom.clusterBboxes.resize(geom.numClusters);
-
-        const glm::vec3* positions            = geom.positions.data();
-        const uint32_t*  clusterLocalVertices = geom.clusterLocalVertices.data();
-
-        nvh::parallel_ranges(
-            geom.numClusters,
-            [&](uint64_t idxBegin, uint64_t idxEnd, uint32_t threadIdx) {
-              for(uint64_t idx = idxBegin; idx < idxEnd; idx++)
-              {
-                shaderio::Cluster& cluster = geom.clusters[idx];
-
-                shaderio::BBox bbox = {{FLT_MAX, FLT_MAX, FLT_MAX}, {-FLT_MAX, -FLT_MAX, -FLT_MAX}};
-                for(uint32_t v = 0; v < cluster.numVertices; v++)
-                {
-                  uint32_t  vertexIndex = clusterLocalVertices[cluster.firstLocalVertex + v];
-                  glm::vec3 pos         = positions[vertexIndex];
-
-                  bbox.lo = glm::min(bbox.lo, pos);
-                  bbox.hi = glm::max(bbox.hi, pos);
-                }
-
-                geom.clusterBboxes[idx] = bbox;
-              }
-            },
-            numInnerThreads);
-      }
-    }
-
-    m_numClusters += geom.numClusters;
-
-    m_maxPerGeometryClusters = std::max(m_maxPerGeometryClusters, geom.numClusters);
-    m_maxPerGeometryClusterVertices = std::max(m_maxPerGeometryClusterVertices, uint32_t(geom.clusterLocalVertices.size()));
-  };
-
-  nvh::parallel_batches_indexed<1>(m_geometries.size(), fnProcessGeometry, numOuterThreads);
-
-  nvclusterDestroyContext(nvclusterContext);
-  if(fatalError)
-  {
-    return false;
-  }
-
-  double endTime = clock.getMicroSeconds();
-  LOGI("Scene cluster build time: %f milliseconds\n", (endTime - startTime) / 1000.0f);
-
-  // shrink, to adjust for actual max cluster vertices
-  m_clusterVertexHistogram.resize(m_config.clusterVertices + 1);
-
-  m_clusterTriangleHistogramMax = 0u;
-  m_clusterVertexHistogramMax   = 0u;
-  for(size_t i = 0; i < m_clusterTriangleHistogram.size(); i++)
-  {
-    m_clusterTriangleHistogramMax = std::max(m_clusterTriangleHistogramMax, m_clusterTriangleHistogram[i]);
-  }
-  for(size_t i = 0; i < m_clusterVertexHistogram.size(); i++)
-  {
-    m_clusterVertexHistogramMax = std::max(m_clusterVertexHistogramMax, m_clusterVertexHistogram[i]);
-  }
-
-  if(m_config.clusterStripify && (numTotalStrips > 0))
-  {
-    LOGI("Average triangles per strip %.2f\n", double(numTotalTriangles) / double(numTotalStrips));
-  }
-
-  return true;
+      },
+      processingInfo.numInnerThreads);
 }
 
 }  // namespace animatedclusters

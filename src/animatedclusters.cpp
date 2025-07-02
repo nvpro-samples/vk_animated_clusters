@@ -17,82 +17,171 @@
 * SPDX-License-Identifier: Apache-2.0
 */
 
-#include <filesystem>
-
-#include <imgui/backends/imgui_vk_extra.h>
-#include <imgui/imgui_camera_widget.h>
-#include <imgui/imgui_orient.h>
-#include <implot.h>
-#include <nvh/fileoperations.hpp>
-#include <nvh/cameramanipulator.hpp>
-#include <nvh/misc.hpp>
-#include <glm/gtc/type_ptr.hpp>
-#include <glm/gtc/matrix_access.hpp>
-#include <nvvk/debug_util_vk.hpp>
-#include <nvvkhl/sky.hpp>
+#include <fmt/format.h>
+#include <nvutils/file_operations.hpp>
+#include <nvgui/camera.hpp>
 
 #include "animatedclusters.hpp"
-#include "vk_nv_cluster_acc.h"
 
 bool g_verbose = false;
 
 namespace animatedclusters {
 
-bool AnimatedClusters::initScene(const char* filename)
+AnimatedClusters::AnimatedClusters(const Info& info)
+    : m_info(info)
+{
+  nvutils::ProfilerTimeline::CreateInfo createInfo;
+  createInfo.name = "graphics";
+
+  m_profilerTimeline = m_info.profilerManager->createTimeline(createInfo);
+
+  m_info.parameterRegistry->add({"scene"}, {".gltf", ".glb"}, &m_sceneFilePath);
+  m_info.parameterRegistry->add({"renderer"}, (int*)&m_tweak.renderer);
+  m_info.parameterRegistry->add({"verbose"}, &g_verbose, true);
+  m_info.parameterRegistry->add({"resetstats"}, &m_tweak.autoResetTimers);
+  m_info.parameterRegistry->add({"supersample"}, &m_tweak.supersample);
+  m_info.parameterRegistry->add({"animation"}, &m_rendererConfig.doAnimation);
+  m_info.parameterRegistry->add({"templates"}, &m_tweak.useTemplates);
+  m_info.parameterRegistry->add({"implicittemplates"}, &m_tweak.useImplicitTemplates);
+  m_info.parameterRegistry->add({"gridcopies"}, &m_tweak.gridCopies);
+  m_info.parameterRegistry->add({"gridconfig"}, &m_tweak.gridConfig);
+  m_info.parameterRegistry->add({"clusterconfig"}, (int*)&m_tweak.clusterConfig);
+  m_info.parameterRegistry->add({"clusterstripify"}, &m_sceneConfig.clusterStripify);
+  m_info.parameterRegistry->add({"clusterdedicatedvertices"}, &m_sceneConfig.clusterDedicatedVertices);
+  m_info.parameterRegistry->add({"nvcluster"}, &m_sceneConfig.clusterNvLibrary);
+  m_info.parameterRegistry->add({"nvclusterunderfill"}, &m_sceneConfig.clusterNvConfig.costUnderfill);
+  m_info.parameterRegistry->add({"nvclusteroverlap"}, &m_sceneConfig.clusterNvConfig.costOverlap);
+  m_info.parameterRegistry->add({"nvclusterunderfillvertices"}, &m_sceneConfig.clusterNvConfig.costUnderfillVertices);
+  m_info.parameterRegistry->add({"moclusterspatialfill"}, &m_sceneConfig.clusterMeshoptSpatialFill);
+  m_info.parameterRegistry->add({"overridetime"}, &m_tweak.overrideTime);
+  m_info.parameterRegistry->add({"processingthreadpct", "float percentage of threads during initial file load and processing into lod clusters, default 0.5 == 50 %"},
+                                &m_sceneConfig.processingThreadsPct);
+
+  m_frameConfig.frameConstants                        = {};
+  m_frameConfig.frameConstants.ambientOcclusionRays   = 1;
+  m_frameConfig.frameConstants.facetShading           = 1;
+  m_frameConfig.frameConstants.doShadow               = 1;
+  m_frameConfig.frameConstants.ambientOcclusionRadius = 0.1f;
+}
+
+bool AnimatedClusters::initScene(const std::filesystem::path& filePath)
 {
   deinitScene();
 
-  if(filename)
-  {
-    LOGI("Loading scene %s\n", filename);
+  std::string fileName = nvutils::utf8FromPath(filePath);
 
-    m_scene = std::make_unique<Scene>();
-    if(!m_scene->init(filename, m_resources, m_sceneConfig))
-    {
-      m_scene = nullptr;
-      LOGW("Loading scene failed\n");
-    }
-    return m_scene != nullptr;
+  LOGI("Loading scene: %s\n", fileName.c_str());
+
+  m_scene = std::make_unique<Scene>();
+  if(!m_scene->init(filePath, m_sceneConfig, m_resources))
+  {
+    LOGW("Loading scene failed\n");
+
+    m_scene = nullptr;
+    return false;
   }
+
+  adjustSceneClusterConfig();
+  m_sceneFilePath = filePath;
 
   return true;
 }
 
 void AnimatedClusters::deinitScene()
 {
+  NVVK_CHECK(vkDeviceWaitIdle(m_app->getDevice()));
+
   if(m_scene)
   {
     m_scene->deinit(m_resources);
+    m_scene = nullptr;
   }
 }
 
-bool AnimatedClusters::initFramebuffers(int width, int height)
+void AnimatedClusters::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
 {
-  bool result = m_resources.initFramebuffer(width, height, m_tweak.supersample, m_tweak.hbaoFullRes);
-  updateTargetImage();
-
-  return result;
+  m_windowSize = size;
+  m_resources.initFramebuffer(m_windowSize, m_tweak.supersample, m_tweak.hbaoFullRes);
+  updateImguiImage();
+  if(m_renderer)
+  {
+    m_renderer->updatedFrameBuffer(m_resources);
+  }
 }
 
-void AnimatedClusters::updateTargetImage()
+void AnimatedClusters::updateImguiImage()
 {
-  if(m_resources.m_framebuffer.useResolved)
+  if(m_imguiTexture)
   {
-    m_targetImage.image = m_resources.m_framebuffer.imgColorResolved.image;
-    m_targetImage.view  = m_resources.m_framebuffer.viewColorResolved;
+    ImGui_ImplVulkan_RemoveTexture(m_imguiTexture);
+    m_imguiTexture = nullptr;
   }
-  else
+
+  VkImageView imageView = m_resources.m_frameBuffer.useResolved ? m_resources.m_frameBuffer.imgColorResolved.descriptor.imageView :
+                                                                  m_resources.m_frameBuffer.imgColor.descriptor.imageView;
+
+  assert(imageView);
+
+  m_imguiTexture = ImGui_ImplVulkan_AddTexture(m_imguiSampler, imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
+const AnimatedClusters::ClusterInfo AnimatedClusters::s_clusterInfos[NUM_CLUSTER_CONFIGS] = {
+    {32, 32, CLUSTER_32T_32V},     {64, 64, CLUSTER_64T_64V},     {64, 128, CLUSTER_64T_128V},
+    {64, 192, CLUSTER_64T_192V},   {96, 96, CLUSTER_96T_96V},     {128, 128, CLUSTER_128T_128V},
+    {128, 256, CLUSTER_128T_256V}, {256, 256, CLUSTER_256T_256V},
+};
+
+void AnimatedClusters::adjustSceneClusterConfig()
+{
+#if 0
+  m_scene->m_clusterTriangleHistogram.resize(m_scene->m_maxClusterTriangles + 1);
+  m_scene->m_clusterVertexHistogram.resize(m_scene->m_maxClusterVertices + 1);
+
+  // adjust the ui and settings based on actual data
+  for(uint32_t i = 0; i < NUM_CLUSTER_CONFIGS; i++)
   {
-    m_targetImage.image = m_resources.m_framebuffer.imgColor.image;
-    m_targetImage.view  = m_resources.m_framebuffer.viewColor;
+    const ClusterInfo& entry = s_clusterInfos[i];
+    if(m_scene->m_maxClusterTriangles <= entry.tris && m_scene->m_maxClusterVertices <= entry.verts)
+    {
+      m_tweak.clusterConfig = entry.cfg;
+
+      m_scene->m_config.clusterTriangles = entry.tris;
+      m_sceneConfig.clusterTriangles     = entry.tris;
+      m_sceneConfigLast.clusterTriangles = entry.tris;
+
+      m_scene->m_config.clusterVertices = entry.verts;
+      m_sceneConfig.clusterVertices     = entry.verts;
+      m_sceneConfigLast.clusterVertices = entry.verts;
+      return;
+    }
   }
+#endif
+}
+
+void AnimatedClusters::updatedClusterConfig()
+{
+  for(uint32_t i = 0; i < NUM_CLUSTER_CONFIGS; i++)
+  {
+    if(s_clusterInfos[i].cfg == m_tweak.clusterConfig)
+    {
+      m_sceneConfig.clusterTriangles = s_clusterInfos[i].tris;
+      m_sceneConfig.clusterVertices  = s_clusterInfos[i].verts;
+      return;
+    }
+  }
+}
+
+void AnimatedClusters::onPreRender()
+{
+  m_profilerTimeline->frameAdvance();
 }
 
 void AnimatedClusters::deinitRenderer()
 {
+  NVVK_CHECK(vkDeviceWaitIdle(m_app->getDevice()));
+
   if(m_renderer)
   {
-    m_resources.synchronize("sync deinitRenderer");
     m_renderer->deinit(m_resources);
     m_renderer = nullptr;
   }
@@ -131,7 +220,7 @@ void AnimatedClusters::initRenderer(RendererType rtype)
       m_renderer = makeRendererRasterClusters();
       break;
     case RENDERER_RAYTRACE_CLUSTERS:
-      if(m_rtClusterSupport)
+      if(m_resources.m_supportsClusters)
       {
         m_renderer = makeRendererRayTraceClusters();
       }
@@ -163,25 +252,26 @@ void AnimatedClusters::initRenderer(RendererType rtype)
   m_rendererFboChangeID = m_resources.m_fboChangeID;
 }
 
+
 void AnimatedClusters::postInitNewScene()
 {
-  assert(m_scene);
+  float     sceneDimension = glm::length(m_scene->m_bbox.hi - m_scene->m_bbox.lo);
+  glm::vec3 center         = (m_scene->m_bbox.hi + m_scene->m_bbox.lo) * 0.5f;
 
-  setCameraFromScene(m_modelFilename.c_str());
-
-  m_frameConfig.frameConstants = {};
-
-  /* TODO(JEM) remove 
-  m_control.m_sceneUp        = m_modelUpVector;
-  m_control.m_sceneOrbit     = glm::vec3(m_scene->m_bbox.hi + m_scene->m_bbox.lo) * 0.5f;
-  m_control.m_sceneDimension = glm::length((m_scene->m_bbox.hi - m_scene->m_bbox.lo));
-  m_control.m_viewMatrix = glm::lookAt(m_control.m_sceneOrbit - (-glm::vec3(1, .5, 1) * m_control.m_sceneDimension * 0.7f),
-                                       m_control.m_sceneOrbit, m_modelUpVector);
-  */
-
-  float sceneDimension                   = glm::length((m_scene->m_bbox.hi - m_scene->m_bbox.lo));
-  m_frameConfig.frameConstants.wLightPos = (m_scene->m_bbox.hi + m_scene->m_bbox.lo) * 0.5f + sceneDimension;
+  m_frameConfig.frameConstants.wLightPos = center + sceneDimension;
   m_frameConfig.frameConstants.sceneSize = glm::length(m_scene->m_bbox.hi - m_scene->m_bbox.lo);
+
+  setSceneCamera(m_sceneFilePath);
+
+  {
+    // Re-adjusting camera to fit the new scene
+    m_info.cameraManipulator->fit(m_scene->m_bbox.lo, m_scene->m_bbox.hi, true);
+    nvgui::SetHomeCamera(m_info.cameraManipulator->getCamera());
+  }
+
+  float radius = sceneDimension * 0.5f;
+  m_info.cameraManipulator->setClipPlanes(glm::vec2(0.01F * radius, 100.0F * radius));
+  m_info.cameraManipulator->setSceneSize(sceneDimension);
 
   m_frameConfig.frameConstants.animationRippleEnabled   = 1;
   m_frameConfig.frameConstants.animationRippleFrequency = 50.f;
@@ -194,100 +284,66 @@ void AnimatedClusters::postInitNewScene()
   m_frameConfig.frameConstants.ambientOcclusionRadius   = 0.1f;
   m_frameConfig.frameConstants.ambientOcclusionRays     = 16;
   m_frameConfig.frameConstants.lightMixer               = 0.5f;
-  m_frameConfig.frameConstants.skyParams                = shaderio::initSimpleSkyParameters();
+  m_frameConfig.frameConstants.skyParams                = {};
 }
 
-bool AnimatedClusters::initCore(nvvk::Context& context, int winWidth, int winHeight, const std::string& exePath)
+void AnimatedClusters::onAttach(nvapp::Application* app)
 {
-  m_rtClusterSupport = context.hasDeviceExtension(VK_NV_CLUSTER_ACCELERATION_STRUCTURE_EXTENSION_NAME)
-                       && load_VK_NV_cluster_accleration_structure(context.m_instance, context.m_device);
+  m_app = app;
 
-  context.ignoreDebugMessage(0x8c548bfd);  // rayquery missing
-  context.ignoreDebugMessage(0x901f59ec);  // unknown enum
-  context.ignoreDebugMessage(0x79de34d4);  // unsupported ext
-  context.ignoreDebugMessage(0x23e43bb7);  // attachment not written
-  context.ignoreDebugMessage(0x6bbb14);    // spir-v location mesh shader
-  context.ignoreDebugMessage(0x5d6b67e2);  // shader module
-  context.ignoreDebugMessage(0x1292ada1);
-
-  m_renderer = nullptr;
-
+  m_ui.enumAdd(GUI_RENDERER, RENDERER_RASTER_TRIANGLES, "raster triangles");
+  m_ui.enumAdd(GUI_RENDERER, RENDERER_RASTER_CLUSTERS, "raster clusters");
+  m_ui.enumAdd(GUI_RENDERER, RENDERER_RAYTRACE_TRIANGLES, "ray trace triangles");
+  if(m_resources.m_supportsClusters)
   {
-    std::vector<std::string> shaderSearchPaths;
-    std::string              path = NVPSystem::exePath();
-    shaderSearchPaths.push_back(NVPSystem::exePath());
-    shaderSearchPaths.push_back(NVPSystem::exePath() + "shaders");
-    shaderSearchPaths.push_back(std::string("GLSL_" PROJECT_NAME));
-    shaderSearchPaths.push_back(NVPSystem::exePath() + std::string("GLSL_" PROJECT_NAME));
-    shaderSearchPaths.push_back(NVPSystem::exePath() + std::string(PROJECT_RELDIRECTORY) + "shaders");
-    shaderSearchPaths.push_back(NVPSystem::exePath() + std::string(PROJECT_NVPRO_CORE_RELDIRECTORY) + "nvvkhl/shaders");
-
-    bool valid = m_resources.init(&context, shaderSearchPaths);
-    valid      = valid && m_resources.initFramebuffer(winWidth, winHeight, m_tweak.supersample, m_tweak.hbaoFullRes);
-
-    updateTargetImage();
-
-    if(!valid)
+    m_ui.enumAdd(GUI_RENDERER, RENDERER_RAYTRACE_CLUSTERS, "ray trace clusters");
+  }
+  else
+  {
+    LOGW("WARNING: Cluster ray tracing extension not found\n");
+    if(m_tweak.renderer == RENDERER_RAYTRACE_CLUSTERS)
     {
-      LOGE("failed to initialize resources\n");
-      exit(-1);
+      m_tweak.renderer = RENDERER_RASTER_CLUSTERS;
     }
   }
 
   {
-    m_ui.enumAdd(GUI_RENDERER, RENDERER_RASTER_TRIANGLES, "raster triangles");
-    m_ui.enumAdd(GUI_RENDERER, RENDERER_RASTER_CLUSTERS, "raster clusters");
-    m_ui.enumAdd(GUI_RENDERER, RENDERER_RAYTRACE_TRIANGLES, "ray trace triangles");
-    if(m_rtClusterSupport)
+    for(uint32_t i = 0; i < NUM_CLUSTER_CONFIGS; i++)
     {
-      m_ui.enumAdd(GUI_RENDERER, RENDERER_RAYTRACE_CLUSTERS, "ray trace clusters");
+      std::string enumStr = fmt::format("{}T_{}V", s_clusterInfos[i].tris, s_clusterInfos[i].verts);
+      m_ui.enumAdd(GUI_MESHLET, s_clusterInfos[i].cfg, enumStr.c_str());
     }
-    else
-    {
-      LOGW("WARNING: Cluster ray tracing extension not found\n");
-      if(m_tweak.renderer == RENDERER_RAYTRACE_CLUSTERS)
-      {
-        m_tweak.renderer = RENDERER_RASTER_CLUSTERS;
-      }
-    }
-
-    m_ui.enumAdd(GUI_MESHLET, CLUSTER_32T_32T, "32T_32V");
-    m_ui.enumAdd(GUI_MESHLET, CLUSTER_64T_64V, "64T_64V");
-    m_ui.enumAdd(GUI_MESHLET, CLUSTER_96T_96V, "96T_96V");
-    m_ui.enumAdd(GUI_MESHLET, CLUSTER_128T_128V, "128T_128V");
-    m_ui.enumAdd(GUI_MESHLET, CLUSTER_128T_256V, "128T_256V");
-    m_ui.enumAdd(GUI_MESHLET, CLUSTER_256T_256V, "256T_256V");
-    m_ui.enumAdd(GUI_MESHLET, CLUSTER_CUSTOM, "CUSTOM");
-
-    m_ui.enumAdd(GUI_SUPERSAMPLE, 1, "none");
-    m_ui.enumAdd(GUI_SUPERSAMPLE, 2, "4x");
-
-    m_ui.enumAdd(GUI_BUILDMODE, BUILD_DEFAULT, "default");
-    m_ui.enumAdd(GUI_BUILDMODE, BUILD_FAST_BUILD, "fast build");
-    m_ui.enumAdd(GUI_BUILDMODE, BUILD_FAST_TRACE, "fast trace");
-
-    m_ui.enumAdd(GUI_TLAS_UPDATEMODE, TLAS_UPDATE_REFIT, "refit");
-    m_ui.enumAdd(GUI_TLAS_UPDATEMODE, TLAS_UPDATE_REBUILD, "rebuild");
-
-    m_ui.enumAdd(GUI_VISUALIZE, VISUALIZE_NONE, "Material");
-    m_ui.enumAdd(GUI_VISUALIZE, VISUALIZE_CLUSTER, "Clusters");
-    m_ui.enumAdd(GUI_VISUALIZE, VISUALIZE_TRIANGLES, "Triangles");
   }
+
+  m_ui.enumAdd(GUI_SUPERSAMPLE, 1, "none");
+  m_ui.enumAdd(GUI_SUPERSAMPLE, 2, "4x");
+
+  m_ui.enumAdd(GUI_BUILDMODE, BUILD_DEFAULT, "default");
+  m_ui.enumAdd(GUI_BUILDMODE, BUILD_FAST_BUILD, "fast build");
+  m_ui.enumAdd(GUI_BUILDMODE, BUILD_FAST_TRACE, "fast trace");
+
+  m_ui.enumAdd(GUI_TLAS_UPDATEMODE, TLAS_UPDATE_REFIT, "refit");
+  m_ui.enumAdd(GUI_TLAS_UPDATEMODE, TLAS_UPDATE_REBUILD, "rebuild");
+
+  m_ui.enumAdd(GUI_VISUALIZE, VISUALIZE_NONE, "Material");
+  m_ui.enumAdd(GUI_VISUALIZE, VISUALIZE_CLUSTER, "Clusters");
+  m_ui.enumAdd(GUI_VISUALIZE, VISUALIZE_TRIANGLES, "Triangles");
+
+
+  // Initialize core components
+
+  m_profilerGpuTimer.init(m_profilerTimeline, app->getDevice(), app->getPhysicalDevice(), app->getQueue(0).familyIndex, true);
+  m_resources.init(app->getDevice(), app->getPhysicalDevice(), app->getInstance(), app->getQueue(0));
+
+  {
+    NVVK_CHECK(m_resources.m_samplerPool.acquireSampler(m_imguiSampler));
+    NVVK_DBG_NAME(m_imguiSampler);
+  }
+
+  m_resources.initFramebuffer({128, 128}, m_tweak.supersample, m_tweak.hbaoFullRes);
+  updateImguiImage();
 
   updatedClusterConfig();
-
-  // Search for default scene if none was provided on the command line
-  if(m_modelFilename.empty())
-  {
-    const std::vector<std::string> defaultSearchPaths = {NVPSystem::exePath() + "media",  // For the INSTALL target
-                                                         NVPSystem::exePath() + PROJECT_DOWNLOAD_RELDIRECTORY};
-    m_modelFilename                                   = nvh::findFile("bunny_v2/bunny.gltf", defaultSearchPaths, true);
-    if(m_tweak.gridCopies == 1)
-    {
-      m_tweak.gridCopies = 121;  // 11x11 grid
-    }
-  }
-
   {
     // change startup default modes depending on animation state
     m_tweak.blasBuildMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
@@ -296,134 +352,103 @@ bool AnimatedClusters::initCore(nvvk::Context& context, int winWidth, int winHei
     m_tweak.useTemplates     = m_rendererConfig.doAnimation;
   }
 
-  if(initScene(!m_modelFilename.empty() ? m_modelFilename.c_str() : nullptr))
+  // Search for default scene if none was provided on the command line
+  if(m_sceneFilePath.empty())
   {
-    postInitNewScene();
-    initRenderer(m_tweak.renderer);
-  }
-  else
-  {
-    return false;
+    const std::filesystem::path              exeDirectoryPath   = nvutils::getExecutablePath().parent_path();
+    const std::vector<std::filesystem::path> defaultSearchPaths = {
+        // regular build
+        std::filesystem::absolute(exeDirectoryPath / PROJECT_EXE_TO_DOWNLOAD_DIRECTORY),
+        // install build
+        std::filesystem::absolute(exeDirectoryPath / "resources"),
+    };
+
+    m_sceneFilePath = nvutils::findFile("bunny_v2/bunny.gltf", defaultSearchPaths);
+    if(m_tweak.gridCopies == 1)
+    {
+      m_tweak.gridCopies = 121;  // 11x11 grid
+    }
   }
 
-  m_lastTweak               = m_tweak;
-  m_lastSceneConfig         = m_sceneConfig;
-  m_lastRendererConfig      = m_rendererConfig;
-  m_lastCustomShaderPrepend = m_customShaderPrepend;
+  if(!m_sceneFilePath.empty())
+  {
+    if(initScene(m_sceneFilePath))
+    {
+      postInitNewScene();
 
-  return true;
+      initRenderer(m_tweak.renderer);
+    }
+  }
+
+  m_tweakLast          = m_tweak;
+  m_sceneConfigLast    = m_sceneConfig;
+  m_rendererConfigLast = m_rendererConfig;
 }
 
-void AnimatedClusters::deinit(nvvk::Context& context)
+void AnimatedClusters::onDetach()
 {
+  NVVK_CHECK(vkDeviceWaitIdle(m_app->getDevice()));
+
   deinitRenderer();
   deinitScene();
+
+  m_resources.m_samplerPool.releaseSampler(m_imguiSampler);
+  ImGui_ImplVulkan_RemoveTexture(m_imguiTexture);
+
   m_resources.deinit();
+
+  m_profilerGpuTimer.deinit();
 }
 
-void AnimatedClusters::loadFile(const std::string& filename)
+
+void AnimatedClusters::onFileDrop(const std::filesystem::path& filePath)
 {
+  if(filePath.empty())
+    return;
+
   // reset grid parameter (in case scene is too large to be replicated)
   m_tweak.gridCopies = 1;
-  //
-  if(filename.empty())
-    return;
-  m_modelFilename = filename;
-  LOGI("Loading model: %s\n", filename.c_str());
+  LOGI("Loading model: %s\n", nvutils::utf8FromPath(filePath).c_str());
   deinitRenderer();
-  m_resources.synchronize("open file");
 
-  if(initScene(m_modelFilename.c_str()))
+  if(initScene(filePath))
   {
     postInitNewScene();
     initRenderer(m_tweak.renderer);
-    m_lastTweak       = m_tweak;
-    m_lastSceneConfig = m_sceneConfig;
+    m_tweakLast       = m_tweak;
+    m_sceneConfigLast = m_sceneConfig;
   }
 }
 
-void AnimatedClusters::onSceneChanged()
+void AnimatedClusters::handleChanges()
 {
-  m_resources.synchronize("sync sceneChanged");
-  deinitRenderer();
-  initScene(m_modelFilename.c_str());
-}
-
-void AnimatedClusters::updatedClusterConfig()
-{
-  switch(m_tweak.clusterConfig)
-  {
-    case CLUSTER_32T_32T:
-      m_sceneConfig.clusterTriangles = 32;
-      m_sceneConfig.clusterVertices  = 32;
-      break;
-    case CLUSTER_64T_64V:
-      m_sceneConfig.clusterTriangles = 64;
-      m_sceneConfig.clusterVertices  = 64;
-      break;
-    case CLUSTER_96T_96V:
-      m_sceneConfig.clusterTriangles = 96;
-      m_sceneConfig.clusterVertices  = 96;
-      break;
-    case CLUSTER_128T_128V:
-      m_sceneConfig.clusterTriangles = 128;
-      m_sceneConfig.clusterVertices  = 128;
-      break;
-    case CLUSTER_128T_256V:
-      m_sceneConfig.clusterTriangles = 128;
-      m_sceneConfig.clusterVertices  = 256;
-      break;
-    case CLUSTER_256T_256V:
-      m_sceneConfig.clusterTriangles = 256;
-      m_sceneConfig.clusterVertices  = 256;
-      break;
-  }
-}
-
-void AnimatedClusters::applyConfigFile(nvh::ParameterList& parameterList, const char* filename)
-{
-  std::string result = nvh::loadFile(filename, false);
-  if(result.empty())
-  {
-    LOGW("file not found: %s\n", filename);
-    return;
-  }
-  std::vector<const char*> args;
-  nvh::ParameterList::tokenizeString(result, args);
-
-  std::string path = nvh::getFilePath(filename);
-
-  parameterList.applyTokens(uint32_t(args.size()), args.data(), "-", path.c_str());
-}
-
-AnimatedClusters::ChangeStates AnimatedClusters::handleChanges(uint32_t width, uint32_t height, const EventStates& states)
-{
-  AnimatedClusters::ChangeStates changes = {};
-
-  if(m_tweak.clusterConfig != m_lastTweak.clusterConfig)
+  if(m_tweak.clusterConfig != m_tweakLast.clusterConfig)
   {
     updatedClusterConfig();
   }
 
   bool sceneChanged = false;
-  if(memcmp(&m_sceneConfig, &m_lastSceneConfig, sizeof(m_sceneConfig)))
+  if(memcmp(&m_sceneConfig, &m_sceneConfigLast, sizeof(m_sceneConfig)))
   {
     sceneChanged = true;
 
-    onSceneChanged();
+    deinitRenderer();
+    initScene(m_sceneFilePath);
   }
 
   bool shaderChanged = false;
-  if(states.reloadShaders || m_customShaderPrepend != m_lastCustomShaderPrepend)
+  if(m_reloadShaders)
   {
     shaderChanged = true;
   }
 
+  bool frameBufferChanged = false;
   if(tweakChanged(m_tweak.supersample) || tweakChanged(m_tweak.hbaoFullRes))
   {
-    m_resources.initFramebuffer(width, height, m_tweak.supersample, m_tweak.hbaoFullRes);
-    updateTargetImage();
-    changes.targetImage = 1;
+    m_resources.initFramebuffer(m_windowSize, m_tweak.supersample, m_tweak.hbaoFullRes);
+    updateImguiImage();
+
+    frameBufferChanged = true;
   }
 
   bool rendererChanged = false;
@@ -438,34 +463,41 @@ AnimatedClusters::ChangeStates AnimatedClusters::handleChanges(uint32_t width, u
   {
     rendererChanged = true;
 
-    m_resources.synchronize("sync rendererChanged");
     initRenderer(m_tweak.renderer);
   }
+  else if(m_renderer && frameBufferChanged)
+  {
+    m_renderer->updatedFrameBuffer(m_resources);
+  }
 
-  bool hadChange = memcmp(&m_lastTweak, &m_tweak, sizeof(m_tweak))
-                   || memcmp(&m_lastRendererConfig, &m_rendererConfig, sizeof(m_rendererConfig))
-                   || memcmp(&m_lastSceneConfig, &m_sceneConfig, sizeof(m_sceneConfig));
+  bool hadChange = memcmp(&m_tweakLast, &m_tweak, sizeof(m_tweak))
+                   || memcmp(&m_rendererConfigLast, &m_rendererConfig, sizeof(m_rendererConfig))
+                   || memcmp(&m_sceneConfigLast, &m_sceneConfig, sizeof(m_sceneConfig));
 
-  m_lastTweak               = m_tweak;
-  m_lastRendererConfig      = m_rendererConfig;
-  m_lastSceneConfig         = m_sceneConfig;
-  m_lastCustomShaderPrepend = m_customShaderPrepend;
+  m_tweakLast          = m_tweak;
+  m_rendererConfigLast = m_rendererConfig;
+  m_sceneConfigLast    = m_sceneConfig;
 
-  changes.timerReset = hadChange && m_tweak.autoResetTimers;
-
-  return changes;
+  if(hadChange && m_tweak.autoResetTimers)
+  {
+    m_info.profilerManager->resetFrameSections(8);
+  }
 }
 
-void AnimatedClusters::renderFrame(VkCommandBuffer cmd, uint32_t width, uint32_t height, double time, nvvk::ProfilerVK& profilerVK, uint32_t cycleIndex)
+void AnimatedClusters::onRender(VkCommandBuffer cmd)
 {
-  m_resources.beginFrame(cycleIndex);
+  double time = m_clock.getSeconds();
 
-  m_frameConfig.winWidth   = width;
-  m_frameConfig.winHeight  = height;
+  m_resources.beginFrame(m_app->getFrameCycleIndex());
+
+  m_frameConfig.windowSize = m_windowSize;
   m_frameConfig.hbaoActive = false;
 
   if(m_renderer)
   {
+    uint32_t width  = m_windowSize.width;
+    uint32_t height = m_windowSize.height;
+
     if(m_rendererFboChangeID != m_resources.m_fboChangeID)
     {
       m_renderer->updatedFrameBuffer(m_resources);
@@ -500,7 +532,7 @@ void AnimatedClusters::renderFrame(VkCommandBuffer cmd, uint32_t width, uint32_t
       else
       {
         m_animTime += (time - m_lastTime) * 0.5;
-        m_frameConfig.frameConstants.animationState = (m_animTime);
+        m_frameConfig.frameConstants.animationState = float(m_animTime);
       }
     }
     frameConstants.bgColor = m_resources.m_bgColor;
@@ -508,15 +540,15 @@ void AnimatedClusters::renderFrame(VkCommandBuffer cmd, uint32_t width, uint32_t
     frameConstants.viewport    = glm::ivec2(renderWidth, renderHeight);
     frameConstants.viewportf   = glm::vec2(renderWidth, renderHeight);
     frameConstants.supersample = m_tweak.supersample;
-    frameConstants.nearPlane   = CameraManip.getClipPlanes().x;
-    frameConstants.farPlane    = CameraManip.getClipPlanes().y;
-    frameConstants.wUpDir      = CameraManip.getUp();
+    frameConstants.nearPlane   = m_info.cameraManipulator->getClipPlanes().x;
+    frameConstants.farPlane    = m_info.cameraManipulator->getClipPlanes().y;
+    frameConstants.wUpDir      = m_info.cameraManipulator->getUp();
 
-    glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), float(width) / float(height),
+    glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(m_info.cameraManipulator->getFov()), float(width) / float(height),
                                                  frameConstants.nearPlane, frameConstants.farPlane);
     projection[1][1] *= -1;
 
-    glm::mat4 view  = CameraManip.getMatrix();
+    glm::mat4 view  = m_info.cameraManipulator->getViewMatrix();
     glm::mat4 viewI = glm::inverse(view);
 
     frameConstants.viewProjMatrix  = projection * view;
@@ -568,15 +600,15 @@ void AnimatedClusters::renderFrame(VkCommandBuffer cmd, uint32_t width, uint32_t
       hbaoView.halfFovyTan = tany;
     }
 
-    m_renderer->render(cmd, m_resources, *m_scene, m_frameConfig, profilerVK);
+    m_renderer->render(cmd, m_resources, *m_scene, m_frameConfig, m_profilerGpuTimer);
   }
   else
   {
-    m_resources.emptyFrame(cmd, m_frameConfig, profilerVK);
+    m_resources.emptyFrame(cmd, m_frameConfig, m_profilerGpuTimer);
   }
 
   {
-    m_resources.blitFrame(cmd, m_frameConfig, profilerVK);
+    m_resources.blitFrame(cmd, m_frameConfig, m_profilerGpuTimer);
   }
 
   m_resources.endFrame();
@@ -584,9 +616,9 @@ void AnimatedClusters::renderFrame(VkCommandBuffer cmd, uint32_t width, uint32_t
   m_lastTime = time;
 }
 
-void AnimatedClusters::setCameraFromScene(const char* filename)
+void AnimatedClusters::setSceneCamera(const std::filesystem::path& filePath)
 {
-  ImGuiH::SetCameraJsonFile(std::filesystem::path(filename).stem().string());
+  nvgui::SetCameraJsonFile(filePath);
 
   float     radius = glm::length(m_scene->m_bbox.hi - m_scene->m_bbox.lo) * 0.5f;
   glm::vec3 center = (m_scene->m_bbox.hi + m_scene->m_bbox.lo) * 0.5f;
@@ -594,8 +626,7 @@ void AnimatedClusters::setCameraFromScene(const char* filename)
   if(!m_scene->m_cameras.empty())
   {
     auto& c = m_scene->m_cameras[0];
-    //CameraManip.setMatrix(c.worldMatrix);
-    CameraManip.setFov(c.fovy);
+    m_info.cameraManipulator->setFov(c.fovy);
 
 
     c.eye              = glm::vec3(c.worldMatrix[3]);
@@ -605,9 +636,9 @@ void AnimatedClusters::setCameraFromScene(const char* filename)
     c.center           = c.eye + (rotMat * c.center);
     c.up               = {0, 1, 0};
 
-    CameraManip.setCamera({c.eye, c.center, c.up, static_cast<float>(glm::degrees(c.fovy))});
+    m_info.cameraManipulator->setCamera({c.eye, c.center, c.up, static_cast<float>(glm::degrees(c.fovy))});
 
-    ImGuiH::SetHomeCamera({c.eye, c.center, c.up, static_cast<float>(glm::degrees(c.fovy))});
+    nvgui::SetHomeCamera({c.eye, c.center, c.up, static_cast<float>(glm::degrees(c.fovy))});
     for(auto& cam : m_scene->m_cameras)
     {
       cam.eye            = glm::vec3(cam.worldMatrix[3]);
@@ -618,22 +649,20 @@ void AnimatedClusters::setCameraFromScene(const char* filename)
       cam.up             = {0, 1, 0};
 
 
-      ImGuiH::AddCamera({cam.eye, cam.center, cam.up, static_cast<float>(glm::degrees(cam.fovy))});
+      nvgui::AddCamera({cam.eye, cam.center, cam.up, static_cast<float>(glm::degrees(cam.fovy))});
     }
   }
   else
   {
     // Re-adjusting camera to fit the new scene
-    CameraManip.fit(m_scene->m_bbox.lo, m_scene->m_bbox.hi, true);
-    ImGuiH::SetHomeCamera(CameraManip.getCamera());
+    m_info.cameraManipulator->fit(m_scene->m_bbox.lo, m_scene->m_bbox.hi, true);
+    nvgui::SetHomeCamera(m_info.cameraManipulator->getCamera());
   }
-
-  CameraManip.setClipPlanes(glm::vec2(0.01F * radius, 100.0F * radius));
 }
 
 float AnimatedClusters::decodePickingDepth(const shaderio::Readback& readback)
 {
-  if(!isReadbackValid(readback))
+  if(!isPickingValid(readback))
   {
     return 0.f;
   }
@@ -643,99 +672,9 @@ float AnimatedClusters::decodePickingDepth(const shaderio::Readback& readback)
   return 1.f - res;
 }
 
-bool AnimatedClusters::isReadbackValid(const shaderio::Readback& readback)
+bool AnimatedClusters::isPickingValid(const shaderio::Readback& readback)
 {
   return readback._packedDepth0 != 0u;
 }
 
-void AnimatedClusters::setupConfigParameters(nvh::ParameterList& parameterList)
-{
-  parameterList.add("verbose", &g_verbose, true);
-
-  parameterList.add("resetstats", &m_tweak.autoResetTimers);
-
-  parameterList.add("renderer", (uint32_t*)&m_tweak.renderer);
-  parameterList.add("supersample", &m_tweak.supersample);
-  parameterList.add("animation", &m_rendererConfig.doAnimation);
-  parameterList.add("templates", &m_tweak.useTemplates);
-  parameterList.add("implicittemplates", &m_tweak.useImplicitTemplates);
-  parameterList.add("gridcopies", &m_tweak.gridCopies);
-  parameterList.add("gridconfig", &m_tweak.gridConfig);
-  parameterList.add("clusterconfig", (int*)&m_tweak.clusterConfig);
-  parameterList.add("nvcluster", &m_sceneConfig.clusterNvLibrary);
-  parameterList.add("nvclustergraph", &m_sceneConfig.clusterNvGraphWeight);
-  parameterList.add("nvclusterunderfill", &m_sceneConfig.clusterNvUnderfill);
-  parameterList.add("nvclusteroverlap", &m_sceneConfig.clusterNvOverlap);
-  parameterList.add("clusterdedicatedvertices", &m_sceneConfig.clusterDedicatedVertices);
-  parameterList.add("overridetime", &m_tweak.overrideTime);
-
-  parameterList.addFilename(".gltf", &m_modelFilename);
-  parameterList.addFilename(".glb", &m_modelFilename);
-}
-
-void AnimatedClusters::setupContextInfo(nvvk::ContextCreateInfo& contextInfo)
-{
-  static VkPhysicalDeviceMeshShaderFeaturesEXT meshFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
-  meshFeatures.primitiveFragmentShadingRateMeshShader = VK_FALSE;
-
-  static VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR execPropertiesFeatures = {
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
-  static VkPhysicalDeviceImagelessFramebufferFeaturesKHR imagelessFeatures = {
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES_KHR};
-  static VkPhysicalDeviceShaderClockFeaturesKHR clockFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR};
-
-  static VkPhysicalDeviceAccelerationStructureFeaturesKHR accFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
-  static VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
-  static VkPhysicalDeviceRayQueryFeaturesKHR queryFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
-  static VkPhysicalDeviceClusterAccelerationStructureFeaturesNV clusterFeatures = {
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_FEATURES_NV};
-
-  static VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
-
-  static VkPhysicalDeviceFragmentShadingRateFeaturesKHR shadingRateFeatures{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR};
-
-  contextInfo.apiMajor = 1;
-  contextInfo.apiMinor = 3;
-
-#if _DEBUG && 0
-  //m_contextInfo.addInstanceLayer("VK_LAYER_KHRONOS_validation");
-  contextInfo.removeInstanceLayer("VK_LAYER_KHRONOS_validation");
-#endif
-
-  contextInfo.addInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-
-#ifdef _DEBUG
-  // enable debugPrintf
-  contextInfo.addDeviceExtension(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME, false);
-  static VkValidationFeaturesEXT      validationInfo    = {VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
-  static VkValidationFeatureEnableEXT enabledFeatures[] = {VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT};
-  validationInfo.enabledValidationFeatureCount          = NV_ARRAY_SIZE(enabledFeatures);
-  validationInfo.pEnabledValidationFeatures             = enabledFeatures;
-  contextInfo.instanceCreateInfoExt                     = &validationInfo;
-#ifdef _WIN32
-  _putenv_s("DEBUG_PRINTF_TO_STDOUT", "1");
-#else
-  putenv("DEBUG_PRINTF_TO_STDOUT=1");
-#endif
-#endif  // _DEBUG
-
-  contextInfo.addDeviceExtension(VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME, false);
-  contextInfo.addDeviceExtension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, false);
-  contextInfo.addDeviceExtension(VK_KHR_SHADER_CLOCK_EXTENSION_NAME, false, &clockFeatures);
-  contextInfo.addDeviceExtension(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME, true, &shadingRateFeatures);
-  contextInfo.addDeviceExtension(VK_EXT_MESH_SHADER_EXTENSION_NAME, false, &meshFeatures);
-
-  contextInfo.addDeviceExtension(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, true, &execPropertiesFeatures);
-
-  contextInfo.addDeviceExtension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME, false);
-  contextInfo.addDeviceExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, false, &accFeatures);
-  contextInfo.addDeviceExtension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, false, &rayFeatures);
-  contextInfo.addDeviceExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME, false, &queryFeatures);
-
-  contextInfo.addDeviceExtension(VK_NV_CLUSTER_ACCELERATION_STRUCTURE_EXTENSION_NAME, true, &clusterFeatures,
-                                 VK_NV_CLUSTER_ACCELERATION_STRUCTURE_SPEC_VERSION);
-
-  contextInfo.addDeviceExtension(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME, false, &atomicFloatFeatures);
-}
 }  // namespace animatedclusters

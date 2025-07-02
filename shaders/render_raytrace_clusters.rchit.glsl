@@ -48,7 +48,7 @@ spirv_decorate(extensions = ["SPV_NV_cluster_acceleration_structure"], capabilit
 
 /////////////////////////////////
 
-layout(std140, binding = BINDINGS_FRAME_UBO, set = 0) uniform frameConstantsBuffer
+layout(scalar, binding = BINDINGS_FRAME_UBO, set = 0) uniform frameConstantsBuffer
 {
   FrameConstants view;
 };
@@ -190,7 +190,7 @@ void main()
 
   vec3 wNrm = normalize(vec3(oNrm * gl_WorldToObjectEXT));
 
-  vec3 directionToLight = view.skyParams.directionToLight;
+  vec3 directionToLight = view.skyParams.sunDirection;
   float ambientOcclusion = ambientOcclusion(wPos, wNrm, view.ambientOcclusionRays, view.ambientOcclusionRadius * view.sceneSize);
 
   float sunContribution = 1.0;

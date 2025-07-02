@@ -20,7 +20,7 @@
 #ifndef _SHADERIO_H_
 #define _SHADERIO_H_
 
-#include "dh_sky.h"
+#include "nvshaders/sky_io.h.slang"
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -50,7 +50,6 @@
 #ifdef __cplusplus
 namespace shaderio {
 using namespace glm;
-using namespace nvvkhl_shaders;
 #define BUFFER_REF(typ) uint64_t
 #define BUFFER_REF_DECLARE_ARRAY(refname, typ, keywords, alignment)                                                    \
   static_assert(alignof(typ) == alignment || (alignment > alignof(typ) && ((alignment % alignof(typ)) == 0)),          \
@@ -211,7 +210,7 @@ struct FrameConstants
   uint  visFilterInstanceID;
   uint  visFilterClusterID;
 
-  SimpleSkyParameters skyParams;
+  SkySimpleParameters skyParams;
 };
 
 struct Readback
@@ -239,7 +238,7 @@ struct Readback
 
 struct AnimationConstants
 {
-  uint64_t renderInstances;
+  BUFFER_REF(RenderInstances_in) instances;
 
   uint32_t instanceIndex;
   float    animationState;

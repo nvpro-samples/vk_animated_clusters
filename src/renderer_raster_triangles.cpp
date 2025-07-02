@@ -17,8 +17,10 @@
 * SPDX-License-Identifier: Apache-2.0
 */
 
+#include <fmt/format.h>
+
 #include "renderer.hpp"
-#include "shaders/shaderio.h"
+#include "../shaders/shaderio.h"
 
 namespace animatedclusters {
 
@@ -26,7 +28,7 @@ class RendererRasterTriangles : public Renderer
 {
 public:
   virtual bool init(Resources& res, Scene& scene, const RendererConfig& config) override;
-  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler) override;
+  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler) override;
   virtual void deinit(Resources& res) override;
 
 private:
@@ -34,19 +36,34 @@ private:
 
   struct Shaders
   {
-    nvvk::ShaderModuleID vertexShader;
-    nvvk::ShaderModuleID fragmentShader;
+    shaderc::SpvCompilationResult trianglesVertex;
+    shaderc::SpvCompilationResult trianglesFragment;
+    shaderc::SpvCompilationResult backgroundVertex;
+    shaderc::SpvCompilationResult backgroundFragment;
   } m_shaders;
 
+  struct Pipelines
+  {
+    VkPipeline triangles{};
+    VkPipeline background{};
+  } m_pipelines;
 
-  nvvk::DescriptorSetContainer m_dsetContainer;
-  VkPipeline                   m_pipeline = nullptr;
+  nvvk::DescriptorPack m_dsetPack;
+  VkPipelineLayout     m_pipelineLayout{};
+  VkShaderStageFlags   m_stageFlags{};
 };
 
 bool RendererRasterTriangles::initShaders(Resources& res, Scene& scene, const RendererConfig& config)
 {
-  m_shaders.vertexShader = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_VERTEX_BIT, "render_raster_triangles.vert.glsl");
-  m_shaders.fragmentShader = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_FRAGMENT_BIT, "render_raster.frag.glsl");
+  shaderc::CompileOptions options = res.m_glslCompiler.options();
+  options.AddMacroDefinition("LINKED_MESH_SHADER", "0");
+
+  res.compileShader(m_shaders.trianglesVertex, VK_SHADER_STAGE_VERTEX_BIT, "render_raster_triangles.vert.glsl", &options);
+  res.compileShader(m_shaders.trianglesFragment, VK_SHADER_STAGE_FRAGMENT_BIT, "render_raster.frag.glsl", &options);
+
+  res.compileShader(m_shaders.backgroundVertex, VK_SHADER_STAGE_VERTEX_BIT, "background.vert.glsl");
+  res.compileShader(m_shaders.backgroundFragment, VK_SHADER_STAGE_FRAGMENT_BIT, "background.frag.glsl");
+
   if(!res.verifyShaders(m_shaders))
   {
     return false;
@@ -57,6 +74,8 @@ bool RendererRasterTriangles::initShaders(Resources& res, Scene& scene, const Re
 
 bool RendererRasterTriangles::init(Resources& res, Scene& scene, const RendererConfig& config)
 {
+  VkDevice device = res.m_device;
+
   m_config = config;
 
   if(!initShaders(res, scene, config))
@@ -66,77 +85,84 @@ bool RendererRasterTriangles::init(Resources& res, Scene& scene, const RendererC
 
   m_resourceUsageInfo.sceneMemBytes += scene.m_sceneTriangleMemBytes;
 
-  m_dsetContainer.init(res.m_device);
+  m_stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
-  VkShaderStageFlags stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+  m_dsetPack.bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+  m_dsetPack.bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+  m_dsetPack.bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+  m_dsetPack.initFromBindings(device, 1);
 
-  m_dsetContainer.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stageFlags);
-  m_dsetContainer.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
-  m_dsetContainer.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
-  m_dsetContainer.initLayout();
+  nvvk::createPipelineLayout(device, &m_pipelineLayout, {m_dsetPack.layout}, {{m_stageFlags, 0, sizeof(uint32_t)}});
 
-  VkPushConstantRange pushRange;
-  pushRange.offset     = 0;
-  pushRange.size       = sizeof(uint32_t);
-  pushRange.stageFlags = stageFlags;
-  m_dsetContainer.initPipeLayout(1, &pushRange);
+  nvvk::WriteSetContainer writeSets;
+  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
+  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
+  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
+  vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
 
-  m_dsetContainer.initPool(1);
-  VkWriteDescriptorSet writeSets[3];
-  writeSets[0] = m_dsetContainer.makeWrite(0, BINDINGS_FRAME_UBO, &res.m_common.view.info);
-  writeSets[1] = m_dsetContainer.makeWrite(0, BINDINGS_READBACK_SSBO, &res.m_common.readbackDevice.info);
-  writeSets[2] = m_dsetContainer.makeWrite(0, BINDINGS_RENDERINSTANCES_SSBO, &m_renderInstanceBuffer.info);
-  vkUpdateDescriptorSets(res.m_device, 3, writeSets, 0, nullptr);
+  {
+    nvvk::GraphicsPipelineCreator graphicsGen;
+    nvvk::GraphicsPipelineState   graphicsState = res.m_basicGraphicsState;
 
-  nvvk::GraphicsPipelineState     state = res.m_basicGraphicsState;
-  nvvk::GraphicsPipelineGenerator gfxGen(res.m_device, m_dsetContainer.getPipeLayout(),
-                                         res.m_framebuffer.pipelineRenderingInfo, state);
-  gfxGen.addShader(res.m_shaderManager.get(m_shaders.vertexShader), VK_SHADER_STAGE_VERTEX_BIT);
-  gfxGen.addShader(res.m_shaderManager.get(m_shaders.fragmentShader), VK_SHADER_STAGE_FRAGMENT_BIT);
-  m_pipeline = gfxGen.createPipeline();
+    graphicsGen.pipelineInfo.layout                  = m_pipelineLayout;
+    graphicsGen.renderingState.depthAttachmentFormat = res.m_frameBuffer.pipelineRenderingInfo.depthAttachmentFormat;
+    graphicsGen.renderingState.stencilAttachmentFormat = res.m_frameBuffer.pipelineRenderingInfo.stencilAttachmentFormat;
+    graphicsGen.colorFormats = {res.m_frameBuffer.colorFormat};
 
+    graphicsGen.addShader(VK_SHADER_STAGE_VERTEX_BIT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.trianglesVertex));
+    graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.trianglesFragment));
+
+    graphicsGen.createGraphicsPipeline(res.m_device, nullptr, graphicsState, &m_pipelines.triangles);
+
+    graphicsGen.clearShaders();
+
+    graphicsState.depthStencilState.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+
+    graphicsGen.addShader(VK_SHADER_STAGE_VERTEX_BIT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.backgroundVertex));
+    graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.backgroundFragment));
+
+    graphicsGen.createGraphicsPipeline(res.m_device, nullptr, graphicsState, &m_pipelines.background);
+  }
   return true;
 }
 
-void RendererRasterTriangles::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
+void RendererRasterTriangles::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler)
 {
   if(m_config.doAnimation)
   {
     updateAnimation(primary, res, scene, frame, profiler);
   }
 
-  const bool useSky = true;  // When using Sky, the sky is rendered first and the rest of the scene is rendered on top of it.
-
   {
-    auto timerSection = profiler.timeRecurring("Render", primary);
+    auto timerSection = profiler.cmdFrameSection(primary, "Render");
 
-    vkCmdUpdateBuffer(primary, res.m_common.view.buffer, 0, sizeof(shaderio::FrameConstants), (const uint32_t*)&frame.frameConstants);
-    vkCmdFillBuffer(primary, res.m_common.readbackDevice.buffer, 0, sizeof(shaderio::Readback), 0);
-    
+    vkCmdUpdateBuffer(primary, res.m_commonBuffers.frameConstants.buffer, 0, sizeof(shaderio::FrameConstants),
+                      (const uint32_t*)&frame.frameConstants);
+    vkCmdFillBuffer(primary, res.m_commonBuffers.readBack.buffer, 0, sizeof(shaderio::Readback), 0);
+
+    nvvk::cmdMemoryBarrier(primary, VK_PIPELINE_STAGE_TRANSFER_BIT, Resources::ALL_SHADER_STAGES);
+
+    bool               useSky = true;
+    VkAttachmentLoadOp loadOp = useSky ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_CLEAR;
+    res.cmdBeginRendering(primary, false, loadOp, loadOp);
+
+    vkCmdBindDescriptorSets(primary, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, m_dsetPack.sets.data(), 0, nullptr);
+
     if(useSky)
     {
-      res.m_sky.skyParams() = frame.frameConstants.skyParams;
-      res.m_sky.updateParameterBuffer(primary);
-      res.cmdImageTransition(primary, res.m_framebuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
-      res.m_sky.draw(primary, frame.frameConstants.viewMatrix, frame.frameConstants.projMatrix,
-                     res.m_framebuffer.scissor.extent);
+      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelines.background);
+      vkCmdDraw(primary, 3, 1, 0, 0);
     }
-
-    res.cmdBeginRendering(primary, false, useSky ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR);
 
     if(frame.drawObjects)
     {
-      res.cmdDynamicState(primary);
-      vkCmdBindDescriptorSets(primary, VK_PIPELINE_BIND_POINT_GRAPHICS, m_dsetContainer.getPipeLayout(), 0, 1,
-                              m_dsetContainer.getSets(), 0, nullptr);
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelines.triangles);
 
       for(size_t i = 0; i < m_renderInstances.size(); i++)
       {
         const shaderio::RenderInstance& renderInstance = m_renderInstances[i];
         uint32_t                        instanceIndex  = (uint32_t)i;
-        vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(instanceIndex), &instanceIndex);
+        vkCmdPushConstants(primary, m_pipelineLayout, m_stageFlags, 0, sizeof(instanceIndex), &instanceIndex);
         vkCmdBindIndexBuffer(primary, scene.m_geometries[renderInstance.geometryID].trianglesBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(primary, renderInstance.numTriangles * 3, 1, 0, 0, 0);
       }
@@ -148,11 +174,10 @@ void RendererRasterTriangles::render(VkCommandBuffer primary, Resources& res, Sc
 
 void RendererRasterTriangles::deinit(Resources& res)
 {
-  vkDestroyPipeline(res.m_device, m_pipeline, nullptr);
+  res.destroyPipelines(m_pipelines);
+  vkDestroyPipelineLayout(res.m_device, m_pipelineLayout, nullptr);
 
-  m_dsetContainer.deinit();
-
-  res.destroyShaders(m_shaders);
+  m_dsetPack.deinit();
 
   deinitBasics(res);
 }

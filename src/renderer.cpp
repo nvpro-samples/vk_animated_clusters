@@ -23,19 +23,16 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/scalar_constants.hpp>
-#include <nvvk/raytraceKHR_vk.hpp>
 
 #include "renderer.hpp"
-#include "shaders/shaderio.h"
+#include "../shaders/shaderio.h"
 
 namespace animatedclusters {
 
 bool Renderer::initBasicShaders(Resources& res, Scene& scene, const RendererConfig& config)
 {
-  m_basicShaders.animVertexShader =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "animupdate_vertices.comp.glsl");
-  m_basicShaders.animNormalShader =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "animupdate_normals.comp.glsl");
+  res.compileShader(m_basicShaders.animComputeVertices, VK_SHADER_STAGE_COMPUTE_BIT, "animupdate_vertices.comp.glsl");
+  res.compileShader(m_basicShaders.animComputeNormals, VK_SHADER_STAGE_COMPUTE_BIT, "animupdate_normals.comp.glsl");
 
   if(!res.verifyShaders(m_basicShaders))
   {
@@ -49,10 +46,22 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
 {
   m_resourceUsageInfo = {};
 
-  m_animDispatcher.init(res.m_device);
-  m_animDispatcher.setCode(res.m_shaderManager.get(m_basicShaders.animVertexShader), 0);
-  m_animDispatcher.setCode(res.m_shaderManager.get(m_basicShaders.animNormalShader), 1);
-  m_animDispatcher.finalizePipeline();
+  nvvk::createPipelineLayout(res.m_device, &m_animPipelineLayout, {},
+                             {{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(shaderio::AnimationConstants)}});
+
+  VkShaderModuleCreateInfo    shaderInfo = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+  VkComputePipelineCreateInfo info       = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+  info.layout                            = m_animPipelineLayout;
+  info.stage                             = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+  info.stage.stage                       = VK_SHADER_STAGE_COMPUTE_BIT;
+  info.stage.pName                       = "main";
+  info.stage.pNext                       = &shaderInfo;
+
+  shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_basicShaders.animComputeVertices);
+  vkCreateComputePipelines(res.m_device, nullptr, 1, &info, nullptr, &m_basicPipelines.animComputeVertices);
+
+  shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_basicShaders.animComputeNormals);
+  vkCreateComputePipelines(res.m_device, nullptr, 1, &info, nullptr, &m_basicPipelines.animComputeNormals);
 
   m_renderInstances.resize(scene.m_instances.size() * config.numSceneCopies);
   m_renderInstanceBuffers.resize(m_renderInstances.size());
@@ -220,44 +229,47 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
     renderInstance.originalPositions     = geometry.positionsBuffer.address;
 
 
-    RenderInstanceBuffers& renderInstanceBuffers = m_renderInstanceBuffers[i];
+    RenderInstanceData& renderInstanceData = m_renderInstanceBuffers[i];
 
     if(config.doAnimation)
     {
       // animated, each instance gets its own copy
-      renderInstanceBuffers.positions =
-          res.createBuffer(sizeof(glm::vec3) * geometry.numVertices,
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-      renderInstanceBuffers.normals =
-          res.createBuffer(sizeof(glm::vec3) * geometry.numVertices,
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-      m_resourceUsageInfo.sceneMemBytes += renderInstanceBuffers.positions.info.range;
-      m_resourceUsageInfo.sceneMemBytes += renderInstanceBuffers.normals.info.range;
+      res.m_allocator.createBuffer(renderInstanceData.positions, sizeof(glm::vec3) * geometry.numVertices,
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+
+      res.m_allocator.createBuffer(renderInstanceData.normals, sizeof(glm::vec3) * geometry.numVertices,
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+
+      m_resourceUsageInfo.sceneMemBytes += renderInstanceData.positions.bufferSize;
+      m_resourceUsageInfo.sceneMemBytes += renderInstanceData.normals.bufferSize;
 
       // seed with original data
       VkBufferCopy region;
       region.dstOffset = 0;
       region.size      = sizeof(glm::vec3) * geometry.numVertices;
       region.srcOffset = 0;
-      vkCmdCopyBuffer(cmd, geometry.positionsBuffer.buffer, renderInstanceBuffers.positions.buffer, 1, &region);
+      vkCmdCopyBuffer(cmd, geometry.positionsBuffer.buffer, renderInstanceData.positions.buffer, 1, &region);
 
-      vkCmdFillBuffer(cmd, renderInstanceBuffers.normals.buffer, 0, renderInstanceBuffers.normals.info.range, 0);
+      vkCmdFillBuffer(cmd, renderInstanceData.normals.buffer, 0, renderInstanceData.normals.bufferSize, 0);
 
-      renderInstance.positions = renderInstanceBuffers.positions.address;
-      renderInstance.normals   = renderInstanceBuffers.normals.address;
+      renderInstance.positions = renderInstanceData.positions.address;
+      renderInstance.normals   = renderInstanceData.normals.address;
     }
     else if(isFirstInstance)
     {
       // first instance for a geometry will allocate a normal buffer, that all other instances will share
-      renderInstanceBuffers.normals =
-          res.createBuffer(sizeof(glm::vec3) * geometry.numVertices,
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-      m_resourceUsageInfo.sceneMemBytes += renderInstanceBuffers.normals.info.range;
+      res.m_allocator.createBuffer(renderInstanceData.normals, sizeof(glm::vec3) * geometry.numVertices,
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+
+      m_resourceUsageInfo.sceneMemBytes += renderInstanceData.normals.bufferSize;
 
       renderInstance.positions = geometry.positionsBuffer.address;
-      renderInstance.normals   = renderInstanceBuffers.normals.address;
+      renderInstance.normals   = renderInstanceData.normals.address;
     }
     else
     {
@@ -266,21 +278,22 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
     }
   }
   res.tempSyncSubmit(cmd);
+  res.m_allocator.createBuffer(m_renderInstanceBuffer, sizeof(shaderio::RenderInstance) * m_renderInstances.size(),
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-  m_renderInstanceBuffer =
-      res.createBuffer(sizeof(shaderio::RenderInstance) * m_renderInstances.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   res.simpleUploadBuffer(m_renderInstanceBuffer, m_renderInstances.data());
 
-  m_resourceUsageInfo.sceneMemBytes += m_renderInstanceBuffer.info.range;
+  m_resourceUsageInfo.sceneMemBytes += m_renderInstanceBuffer.bufferSize;
 
   {
     cmd = res.createTempCmdBuffer();
 
     // update normals once
     shaderio::AnimationConstants constants;
-    constants.animationState  = 0;
-    constants.renderInstances = m_renderInstanceBuffer.address;
+    constants.animationState = 0;
+    constants.instances      = m_renderInstanceBuffer.address;
 
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_basicPipelines.animComputeNormals);
 
     for(size_t i = 0; i < m_renderInstances.size(); i++)
     {
@@ -290,8 +303,8 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
         continue;
 
       constants.instanceIndex = uint32_t(i);
-      m_animDispatcher.dispatchThreads(cmd, m_renderInstances[i].numTriangles, &constants, nvvk::DispatcherBarrier::eTransfer,
-                                       nvvk::DispatcherBarrier::eNone, ANIMATION_WORKGROUP_SIZE, 1);
+      vkCmdPushConstants(cmd, m_animPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), &constants);
+      vkCmdDispatch(cmd, nvvk::getGroupCounts(m_renderInstances[i].numTriangles, ANIMATION_WORKGROUP_SIZE), 1, 1);
     }
 
     res.tempSyncSubmit(cmd);
@@ -301,27 +314,28 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
 
 void Renderer::deinitBasics(Resources& res)
 {
-  res.destroyShaders(m_basicShaders);
-  m_animDispatcher.deinit();
+  res.destroyPipelines(m_basicPipelines);
+
+  vkDestroyPipelineLayout(res.m_device, m_animPipelineLayout, nullptr);
 
   for(auto& it : m_renderInstanceBuffers)
   {
-    res.destroy(it.positions);
-    res.destroy(it.normals);
+    res.m_allocator.destroyBuffer(it.positions);
+    res.m_allocator.destroyBuffer(it.normals);
   }
 
-  res.destroy(m_renderInstanceBuffer);
+  res.m_allocator.destroyBuffer(m_renderInstanceBuffer);
 }
 
-void Renderer::updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
+void Renderer::updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler)
 {
   assert(m_config.doAnimation);
 
-  auto timerSection = profiler.timeRecurring("Animation", cmd);
+  auto timerSection = profiler.cmdFrameSection(cmd, "Animation");
 
   shaderio::AnimationConstants constants;
-  constants.animationState  = frame.frameConstants.animationState;
-  constants.renderInstances = m_renderInstanceBuffer.address;
+  constants.animationState = frame.frameConstants.animationState;
+  constants.instances      = m_renderInstanceBuffer.address;
 
   constants.rippleEnabled   = frame.frameConstants.animationRippleEnabled;
   constants.rippleFrequency = frame.frameConstants.animationRippleFrequency;
@@ -332,6 +346,7 @@ void Renderer::updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene
   constants.twistMaxAngle   = frame.frameConstants.animationTwistMaxAngle * glm::pi<float>() / 180.f;
 
   // first pass all positions
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_basicPipelines.animComputeVertices);
   for(size_t i = 0; i < m_renderInstances.size(); i++)
   {
     const Scene::Geometry& sceneGeometry = scene.m_geometries[m_renderInstances[i].geometryID];
@@ -343,30 +358,19 @@ void Renderer::updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene
 
     constants.geometrySize = glm::length(sceneGeometry.bbox.hi - sceneGeometry.bbox.lo);
 
-    if(m_config.doAnimation)
-    {
-      m_animDispatcher.dispatchThreads(cmd, m_renderInstances[i].numVertices, &constants, nvvk::DispatcherBarrier::eNone,
-                                       nvvk::DispatcherBarrier::eNone, ANIMATION_WORKGROUP_SIZE, 0);
-    }
-    else
-    {
-      VkBufferCopy copy;
-      copy.dstOffset = 0;
-      copy.size      = sceneGeometry.positionsBuffer.info.range;
-      copy.srcOffset = 0;
-      vkCmdCopyBuffer(cmd, sceneGeometry.positionsBuffer.buffer, m_renderInstanceBuffers[i].positions.buffer, 1, &copy);
-    }
+    vkCmdPushConstants(cmd, m_animPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), &constants);
+    vkCmdDispatch(cmd, nvvk::getGroupCounts(m_renderInstances[i].numVertices, ANIMATION_WORKGROUP_SIZE), 1, 1);
   }
 
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+
   // second pass all normals
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_basicPipelines.animComputeNormals);
   for(size_t i = 0; i < m_renderInstances.size(); i++)
   {
     constants.instanceIndex = uint32_t(i);
-    // first dispatch needs barrier
-    uint32_t preBarrier = i == 0 ? (m_config.doAnimation ? nvvk::DispatcherBarrier::eCompute : nvvk::DispatcherBarrier::eTransfer) :
-                                   nvvk::DispatcherBarrier::eNone;
-    m_animDispatcher.dispatchThreads(cmd, m_renderInstances[i].numTriangles, &constants, nvvk::DispatcherBarrier::eNone,
-                                     preBarrier, ANIMATION_WORKGROUP_SIZE, 1);
+    vkCmdPushConstants(cmd, m_animPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), &constants);
+    vkCmdDispatch(cmd, nvvk::getGroupCounts(m_renderInstances[i].numTriangles, ANIMATION_WORKGROUP_SIZE), 1, 1);
   }
 }
 
@@ -396,12 +400,10 @@ void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererCo
 
 
   // Create a buffer holding the actual instance data (matrices++) for use by the AS builder
-  m_tlasInstancesBuffer = res.createBuffer(tlasInstances.size() * sizeof(VkAccelerationStructureInstanceKHR),
-                                           VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                               | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  res.m_allocator.createBuffer(m_tlasInstancesBuffer, tlasInstances.size() * sizeof(VkAccelerationStructureInstanceKHR),
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   m_resourceUsageInfo.rtOtherMemBytes += tlasInstances.size() * sizeof(VkAccelerationStructureInstanceKHR);
   res.simpleUploadBuffer(m_tlasInstancesBuffer, tlasInstances.data());
-  res.tempResetResources();
 
   // Wraps a device pointer to the above uploaded instances.
   VkAccelerationStructureGeometryInstancesDataKHR instancesVk{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
@@ -433,11 +435,11 @@ void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererCo
   createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
   createInfo.size = sizeInfo.accelerationStructureSize;
 
-  m_tlas = res.createAccelKHR(createInfo);
+  res.m_allocator.createAcceleration(m_tlas, createInfo);
   m_resourceUsageInfo.rtTlasMemBytes += createInfo.size;
   // Allocate the scratch memory
-  m_tlasScratchBuffer = res.createBuffer(sizeInfo.buildScratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                                        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
+  res.m_allocator.createBuffer(m_tlasScratchBuffer, sizeInfo.buildScratchSize,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
   m_resourceUsageInfo.rtOtherMemBytes += sizeInfo.buildScratchSize;
 
   // Update build information
@@ -448,7 +450,6 @@ void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererCo
 
 void Renderer::updateRayTracingTlas(VkCommandBuffer cmd, Resources& res, Scene& scene, bool update)
 {
-
   if(update)
   {
     m_tlasBuildInfo.mode                     = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;

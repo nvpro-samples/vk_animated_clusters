@@ -17,11 +17,10 @@
 * SPDX-License-Identifier: Apache-2.0
 */
 
-#include <nvvk/raytraceKHR_vk.hpp>
-#include <nvvk/sbtwrapper_vk.hpp>
-#include <nvvk/images_vk.hpp>
-#include <nvvkhl/pipeline_container.hpp>
-#include <nvh/alignment.hpp>
+#include <nvvk/acceleration_structures.hpp>
+#include <nvvk/sbt_generator.hpp>
+#include <nvvk/commands.hpp>
+#include <nvutils/alignment.hpp>
 
 #include "renderer.hpp"
 
@@ -34,7 +33,7 @@ private:
 
 public:
   virtual bool init(Resources& res, Scene& scene, const RendererConfig& config) override;
-  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler) override;
+  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler) override;
   virtual void deinit(Resources& res) override;
   virtual void updatedFrameBuffer(Resources& res) override;
 
@@ -46,25 +45,35 @@ private:
 
   // without animation allow compaction
   void queryCompactRayTracingBlas(VkCommandBuffer cmd, VkQueryPool queryPool, Resources& res, Scene& scene);
-  void compactRayTracingBlas(VkCommandBuffer cmd, VkQueryPool queryPool, std::vector<nvvk::AccelKHR>& oldBlas, Resources& res, Scene& scene);
+  void compactRayTracingBlas(VkCommandBuffer                           cmd,
+                             VkQueryPool                               queryPool,
+                             std::vector<nvvk::AccelerationStructure>& oldBlas,
+                             Resources&                                res,
+                             Scene&                                    scene);
 
   void initRayTracingPipeline(Resources& res);
 
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
   VkPhysicalDeviceAccelerationStructurePropertiesKHR m_accProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
-  
-  nvvk::SBTWrapper          m_rtSbt;   // Shading binding table wrapper
-  nvvkhl::PipelineContainer m_rtPipe;  // Hold pipelines and layout
+
+  nvvk::SBTGenerator::Regions m_sbtRegions;
+  nvvk::Buffer                m_sbtBuffer;
 
   struct Shaders
   {
-    nvvk::ShaderModuleID rayGenShader;
-    nvvk::ShaderModuleID closestHitShader;
-    nvvk::ShaderModuleID missShader;
-    nvvk::ShaderModuleID missShaderAO;
+    shaderc::SpvCompilationResult rayGen;
+    shaderc::SpvCompilationResult rayClosestHit;
+    shaderc::SpvCompilationResult rayMiss;
+    shaderc::SpvCompilationResult rayMissAO;
   } m_shaders;
 
-  nvvk::DescriptorSetContainer m_dsetContainer;
+  struct Pipelines
+  {
+    VkPipeline rayTracing{};
+  } m_pipelines;
+
+  nvvk::DescriptorPack m_dsetPack;
+  VkPipelineLayout     m_pipelineLayout;
 
   // auxiliary rendering data
 
@@ -73,8 +82,8 @@ private:
   std::vector<VkAccelerationStructureBuildRangeInfoKHR>    m_blasRangeInfos;
   std::vector<VkAccelerationStructureBuildSizesInfoKHR>    m_blasSizeInfos;
 
-  RBuffer                     m_blasScratchBuffer;
-  std::vector<nvvk::AccelKHR> m_blas;
+  nvvk::Buffer                             m_blasScratchBuffer;
+  std::vector<nvvk::AccelerationStructure> m_blas;
 
   VkDeviceSize m_compactSize{0};
 
@@ -83,14 +92,16 @@ private:
 
 bool RendererRayTraceTriangles::initShaders(Resources& res, Scene& scene, const RendererConfig& config)
 {
-  // do shaders first, most likely to contain errors
-  m_shaders.rayGenShader = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_RAYGEN_BIT_KHR, "render_raytrace.rgen.glsl");
-  m_shaders.closestHitShader =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, "render_raytrace_triangles.rchit.glsl");
-  m_shaders.missShader = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl",
-                                                                "#define RAYTRACING_PAYLOAD_INDEX 0\n");
-  m_shaders.missShaderAO = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl",
-                                                                  "#define RAYTRACING_PAYLOAD_INDEX 1\n");
+  shaderc::CompileOptions options = res.m_glslCompiler.options();
+  options.AddMacroDefinition("RAYTRACING_PAYLOAD_INDEX", "0");
+  shaderc::CompileOptions optionsAO = res.m_glslCompiler.options();
+  optionsAO.AddMacroDefinition("RAYTRACING_PAYLOAD_INDEX", "1");
+
+  res.compileShader(m_shaders.rayGen, VK_SHADER_STAGE_RAYGEN_BIT_KHR, "render_raytrace.rgen.glsl");
+  res.compileShader(m_shaders.rayClosestHit, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, "render_raytrace_triangles.rchit.glsl");
+
+  res.compileShader(m_shaders.rayMiss, VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl", &options);
+  res.compileShader(m_shaders.rayMissAO, VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl", &optionsAO);
 
   if(!res.verifyShaders(m_shaders))
   {
@@ -113,7 +124,7 @@ bool RendererRayTraceTriangles::init(Resources& res, Scene& scene, const Rendere
 
   VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &m_rtProperties};
   m_rtProperties.pNext = &m_accProperties;
-  vkGetPhysicalDeviceProperties2(res.m_physical, &prop2);
+  vkGetPhysicalDeviceProperties2(res.m_physicalDevice, &prop2);
 
   initRayTracingBlas(res, scene, config);
 
@@ -148,6 +159,10 @@ bool RendererRayTraceTriangles::init(Resources& res, Scene& scene, const Rendere
 
     VkCommandBuffer cmd = res.createTempCmdBuffer();
 
+    // Note: As hinted at the end of `initRayTracingBlas` function, for static scenarios we normally recommend
+    // interleaving building and compaction to reduce peak memory usage.
+    // However, we kept things basic here and do the initial build for all, then compact all.
+
     updateRayTracingBlas(cmd, res, scene);
     queryCompactRayTracingBlas(cmd, queryPool, res, scene);
 
@@ -155,7 +170,7 @@ bool RendererRayTraceTriangles::init(Resources& res, Scene& scene, const Rendere
 
     cmd = res.createTempCmdBuffer();
 
-    std::vector<nvvk::AccelKHR> oldBlas;
+    std::vector<nvvk::AccelerationStructure> oldBlas;
     compactRayTracingBlas(cmd, queryPool, oldBlas, res, scene);
 
     // feed most recent m_blas into tlas
@@ -175,7 +190,7 @@ bool RendererRayTraceTriangles::init(Resources& res, Scene& scene, const Rendere
     // nor the old blas, after compaction we can delete them
     for(uint32_t idx = 0; idx < blasCount; idx++)
     {
-      res.destroy(oldBlas[idx]);
+      res.m_allocator.destroyAcceleration(oldBlas[idx]);
     }
   }
 
@@ -184,19 +199,19 @@ bool RendererRayTraceTriangles::init(Resources& res, Scene& scene, const Rendere
   return true;
 }
 
-void RendererRayTraceTriangles::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
+void RendererRayTraceTriangles::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler)
 {
   if(m_config.doAnimation)
   {
     updateAnimation(primary, res, scene, frame, profiler);
     {
-      auto timerSection = profiler.timeRecurring("AS Build/Refit", primary);
+      auto timerSection = profiler.cmdFrameSection(primary, "AS Build/Refit");
       {
-        auto timerSection2 = profiler.timeRecurring("blas", primary);
+        auto timerSection2 = profiler.cmdFrameSection(primary, "blas");
         updateRayTracingBlas(primary, res, scene, frame.blasRebuildFraction);
       }
       {
-        auto timerSection2 = profiler.timeRecurring("tlas", primary);
+        auto timerSection2 = profiler.cmdFrameSection(primary, "tlas");
         updateRayTracingTlas(primary, res, scene, !frame.forceTlasFullRebuild);
       }
     }
@@ -205,8 +220,9 @@ void RendererRayTraceTriangles::render(VkCommandBuffer primary, Resources& res, 
   shaderio::Readback readback = {};
   readback.blasesSize         = m_config.doAnimation ? m_resourceUsageInfo.rtBlasMemBytes : m_compactSize;
 
-  vkCmdUpdateBuffer(primary, res.m_common.view.buffer, 0, sizeof(shaderio::FrameConstants), (const uint32_t*)&frame.frameConstants);
-  vkCmdUpdateBuffer(primary, res.m_common.readbackDevice.buffer, 0, sizeof(shaderio::Readback), &readback);
+  vkCmdUpdateBuffer(primary, res.m_commonBuffers.frameConstants.buffer, 0, sizeof(shaderio::FrameConstants),
+                    (const uint32_t*)&frame.frameConstants);
+  vkCmdUpdateBuffer(primary, res.m_commonBuffers.readBack.buffer, 0, sizeof(shaderio::Readback), &readback);
 
   VkMemoryBarrier memBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
   memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -214,20 +230,19 @@ void RendererRayTraceTriangles::render(VkCommandBuffer primary, Resources& res, 
   vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
 
-  res.cmdImageTransition(primary, res.m_framebuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+  res.cmdImageTransition(primary, res.m_frameBuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
 
   // Ray trace
   {
-    auto timerSection = profiler.timeRecurring("Render", primary);
+    auto timerSection = profiler.cmdFrameSection(primary, "Render");
 
     if(frame.drawObjects)
     {
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipe.plines[0]);
-      vkCmdBindDescriptorSets(primary, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipe.layout, 0, 1,
-                              m_dsetContainer.getSets(), 0, nullptr);
+      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelines.rayTracing);
+      vkCmdBindDescriptorSets(primary, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1,
+                              m_dsetPack.sets.data(), 0, nullptr);
 
-      const std::array<VkStridedDeviceAddressRegionKHR, 4>& bindingTables = m_rtSbt.getRegions();
-      vkCmdTraceRaysKHR(primary, &bindingTables[0], &bindingTables[1], &bindingTables[2], &bindingTables[3],
+      vkCmdTraceRaysKHR(primary, &m_sbtRegions.raygen, &m_sbtRegions.miss, &m_sbtRegions.hit, &m_sbtRegions.callable,
                         frame.frameConstants.viewport.x, frame.frameConstants.viewport.y, 1);
     }
   }
@@ -298,16 +313,27 @@ void RendererRayTraceTriangles::initRayTracingBlas(Resources& res, Scene& scene,
 
     // Extra info
     totalBlasSize += m_blasSizeInfos[idx].accelerationStructureSize;
-    totalScratchSize +=
-        nvh::align_up(m_blasSizeInfos[idx].buildScratchSize, m_accProperties.minAccelerationStructureScratchOffsetAlignment);
+    totalScratchSize += nvutils::align_up(m_blasSizeInfos[idx].buildScratchSize,
+                                          m_accProperties.minAccelerationStructureScratchOffsetAlignment);
     maxScratchSize = std::max(maxScratchSize, m_blasSizeInfos[idx].buildScratchSize);
   }
 
   // Allocate the scratch buffers holding the temporary data of the acceleration structure builder
 
-  m_blasScratchBuffer = res.createBuffer(std::min(std::max(maxScratchSize, MAX_BLAS_SCRATCH_BUFFER_SIZE), totalScratchSize),
-                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
-  m_resourceUsageInfo.rtOtherMemBytes += m_blasScratchBuffer.info.range;
+  res.m_allocator.createBuffer(m_blasScratchBuffer,
+                               std::min(std::max(maxScratchSize, MAX_BLAS_SCRATCH_BUFFER_SIZE), totalScratchSize),
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
+  m_resourceUsageInfo.rtOtherMemBytes += m_blasScratchBuffer.bufferSize;
+
+
+  // Note:
+  // We are allocating all BLAS upfront here, this isn't optimal, but keeps complexity
+  // lower and allows easier use of the same codepaths for animated and static scenario.
+  //
+  // If there was no animation at all in this application, then we would interleave the
+  // allocation of the initial BLAS, with building and compacting them to reduce peak memory usage.
+  // This can be seen in the `nvvk::AccelerationStructureBuilder` and `nvvk::AccelerationStructureHelper`
+  // classes.
 
   for(uint32_t idx = 0; idx < blasCount; idx++)
   {
@@ -315,7 +341,7 @@ void RendererRayTraceTriangles::initRayTracingBlas(Resources& res, Scene& scene,
     VkAccelerationStructureCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
     createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     createInfo.size = m_blasSizeInfos[idx].accelerationStructureSize;  // Will be used to allocate memory.
-    m_blas[idx]     = res.createAccelKHR(createInfo);
+    res.m_allocator.createAcceleration(m_blas[idx], createInfo);
     m_resourceUsageInfo.rtBlasMemBytes += createInfo.size;
 
     // BuildInfo #2 part
@@ -339,11 +365,11 @@ void RendererRayTraceTriangles::queryCompactRayTracingBlas(VkCommandBuffer cmd, 
                                                 VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, queryPool, 0);
 }
 
-void RendererRayTraceTriangles::compactRayTracingBlas(VkCommandBuffer              cmd,
-                                                      VkQueryPool                  queryPool,
-                                                      std::vector<nvvk::AccelKHR>& oldBlas,
-                                                      Resources&                   res,
-                                                      Scene&                       scene)
+void RendererRayTraceTriangles::compactRayTracingBlas(VkCommandBuffer                           cmd,
+                                                      VkQueryPool                               queryPool,
+                                                      std::vector<nvvk::AccelerationStructure>& oldBlas,
+                                                      Resources&                                res,
+                                                      Scene&                                    scene)
 {
   assert(!m_config.doAnimation);
 
@@ -365,7 +391,7 @@ void RendererRayTraceTriangles::compactRayTracingBlas(VkCommandBuffer           
     VkAccelerationStructureCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
     createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     createInfo.size = compactSizes[idx];
-    m_blas[idx]     = res.createAccelKHR(createInfo);
+    res.m_allocator.createAcceleration(m_blas[idx], createInfo);
 
     m_compactSize += compactSizes[idx];
 
@@ -416,7 +442,7 @@ void RendererRayTraceTriangles::updateRayTracingBlas(VkCommandBuffer cmd, Resour
       m_blasBuildInfos[idx].srcAccelerationStructure = m_blas[idx].accel;
     }
 
-    if(scratchOffset + m_blasSizeInfos[idx].buildScratchSize >= m_blasScratchBuffer.info.range)
+    if(scratchOffset + m_blasSizeInfos[idx].buildScratchSize >= m_blasScratchBuffer.bufferSize)
     {
       // Since the scratch buffer is reused across builds, we need a barrier when we start a new batch of builds
       VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -429,8 +455,8 @@ void RendererRayTraceTriangles::updateRayTracingBlas(VkCommandBuffer cmd, Resour
     }
 
     m_blasBuildInfos[idx].scratchData.deviceAddress = m_blasScratchBuffer.address + scratchOffset;
-    scratchOffset +=
-        nvh::align_up(m_blasSizeInfos[idx].buildScratchSize, m_accProperties.minAccelerationStructureScratchOffsetAlignment);
+    scratchOffset += nvutils::align_up(m_blasSizeInfos[idx].buildScratchSize,
+                                       m_accProperties.minAccelerationStructureScratchOffsetAlignment);
 
     // Building the bottom-level-acceleration-structure
     VkAccelerationStructureBuildRangeInfoKHR* rangeInfo = &m_blasRangeInfos[idx];
@@ -448,45 +474,29 @@ void RendererRayTraceTriangles::updateRayTracingBlas(VkCommandBuffer cmd, Resour
 
 void RendererRayTraceTriangles::initRayTracingPipeline(Resources& res)
 {
-  m_dsetContainer.init(res.m_device);
+  VkDevice device = res.m_device;
 
   VkShaderStageFlags stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
 
-  m_dsetContainer.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stageFlags);
-  m_dsetContainer.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
-  m_dsetContainer.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
-  m_dsetContainer.addBinding(BINDINGS_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, stageFlags);
-  m_dsetContainer.addBinding(BINDINGS_RENDER_TARGET, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stageFlags);
-  m_dsetContainer.initLayout();
+  m_dsetPack.bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stageFlags);
+  m_dsetPack.bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
+  m_dsetPack.bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
+  m_dsetPack.bindings.addBinding(BINDINGS_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, stageFlags);
+  m_dsetPack.bindings.addBinding(BINDINGS_RENDER_TARGET, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stageFlags);
+  m_dsetPack.initFromBindings(device, 1);
 
-  VkPushConstantRange pushRange;
-  pushRange.offset     = 0;
-  pushRange.size       = sizeof(uint32_t);
-  pushRange.stageFlags = stageFlags;
-  m_dsetContainer.initPipeLayout(1, &pushRange);
+  nvvk::createPipelineLayout(device, &m_pipelineLayout, {m_dsetPack.layout});
 
-  m_dsetContainer.initPool(1);
-  std::array<VkWriteDescriptorSet, 5> writeSets;
-  writeSets[0] = m_dsetContainer.makeWrite(0, BINDINGS_FRAME_UBO, &res.m_common.view.info);
-  writeSets[1] = m_dsetContainer.makeWrite(0, BINDINGS_READBACK_SSBO, &res.m_common.readbackDevice.info);
-  writeSets[2] = m_dsetContainer.makeWrite(0, BINDINGS_RENDERINSTANCES_SSBO, &m_renderInstanceBuffer.info);
+  VkDescriptorImageInfo renderTargetInfo = res.m_frameBuffer.imgColor.descriptor;
+  renderTargetInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
 
-  VkWriteDescriptorSetAccelerationStructureKHR accelInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
-  accelInfo.accelerationStructureCount = 1;
-  VkAccelerationStructureKHR accel     = m_tlas.accel;
-  accelInfo.pAccelerationStructures    = &accel;
-  writeSets[3]                         = m_dsetContainer.makeWrite(0, BINDINGS_TLAS, &accelInfo);
-
-  VkDescriptorImageInfo renderTargetInfo;
-  renderTargetInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  renderTargetInfo.imageView   = res.m_framebuffer.viewColor;
-  writeSets[4]                 = m_dsetContainer.makeWrite(0, BINDINGS_RENDER_TARGET, &renderTargetInfo);
-
-  vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
-
-
-  nvvkhl::PipelineContainer& p = m_rtPipe;
-  p.plines.resize(1);
+  nvvk::WriteSetContainer writeSets;
+  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
+  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
+  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
+  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_TLAS), m_tlas);
+  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDER_TARGET), renderTargetInfo);
+  vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
 
   enum StageIndices
   {
@@ -497,28 +507,37 @@ void RendererRayTraceTriangles::initRayTracingPipeline(Resources& res)
     eShaderGroupCount
   };
   std::array<VkPipelineShaderStageCreateInfo, eShaderGroupCount> stages{};
-  for(auto& s : stages)
-    s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  std::array<VkShaderModuleCreateInfo, eShaderGroupCount>        stageShaders{};
+  for(uint32_t s = 0; s < eShaderGroupCount; s++)
+  {
+    stageShaders[s].sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  }
+  for(uint32_t s = 0; s < eShaderGroupCount; s++)
+  {
+    stages[s].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[s].pNext = &stageShaders[s];
+    stages[s].pName = "main";
+  }
 
-  stages[eRaygen].module     = res.m_shaderManager.get(m_shaders.rayGenShader);
-  stages[eRaygen].pName      = "main";
-  stages[eRaygen].stage      = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-  stages[eMiss].module       = res.m_shaderManager.get(m_shaders.missShader);
-  stages[eMiss].pName        = "main";
-  stages[eMiss].stage        = VK_SHADER_STAGE_MISS_BIT_KHR;
-  stages[eMissAO].module     = res.m_shaderManager.get(m_shaders.missShaderAO);
-  stages[eMissAO].pName      = "main";
-  stages[eMissAO].stage      = VK_SHADER_STAGE_MISS_BIT_KHR;
-  stages[eClosestHit].module = res.m_shaderManager.get(m_shaders.closestHitShader);
-  stages[eClosestHit].pName  = "main";
-  stages[eClosestHit].stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+  stages[eRaygen].stage              = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+  stageShaders[eRaygen].codeSize     = nvvkglsl::GlslCompiler::getSpirvSize(m_shaders.rayGen);
+  stageShaders[eRaygen].pCode        = nvvkglsl::GlslCompiler::getSpirv(m_shaders.rayGen);
+  stages[eMiss].stage                = VK_SHADER_STAGE_MISS_BIT_KHR;
+  stageShaders[eMiss].codeSize       = nvvkglsl::GlslCompiler::getSpirvSize(m_shaders.rayMiss);
+  stageShaders[eMiss].pCode          = nvvkglsl::GlslCompiler::getSpirv(m_shaders.rayMiss);
+  stages[eMissAO].stage              = VK_SHADER_STAGE_MISS_BIT_KHR;
+  stageShaders[eMissAO].codeSize     = nvvkglsl::GlslCompiler::getSpirvSize(m_shaders.rayMissAO);
+  stageShaders[eMissAO].pCode        = nvvkglsl::GlslCompiler::getSpirv(m_shaders.rayMissAO);
+  stages[eClosestHit].stage          = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+  stageShaders[eClosestHit].codeSize = nvvkglsl::GlslCompiler::getSpirvSize(m_shaders.rayClosestHit);
+  stageShaders[eClosestHit].pCode    = nvvkglsl::GlslCompiler::getSpirv(m_shaders.rayClosestHit);
 
   // Shader groups
-  VkRayTracingShaderGroupCreateInfoKHR group{VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR};
-  group.generalShader      = VK_SHADER_UNUSED_KHR;
-  group.closestHitShader   = VK_SHADER_UNUSED_KHR;
-  group.anyHitShader       = VK_SHADER_UNUSED_KHR;
-  group.intersectionShader = VK_SHADER_UNUSED_KHR;
+  VkRayTracingShaderGroupCreateInfoKHR group{.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                                             .generalShader      = VK_SHADER_UNUSED_KHR,
+                                             .closestHitShader   = VK_SHADER_UNUSED_KHR,
+                                             .anyHitShader       = VK_SHADER_UNUSED_KHR,
+                                             .intersectionShader = VK_SHADER_UNUSED_KHR};
 
   std::vector<VkRayTracingShaderGroupCreateInfoKHR> shaderGroups;
   // Raygen
@@ -531,7 +550,7 @@ void RendererRayTraceTriangles::initRayTracingPipeline(Resources& res)
   group.generalShader = eMiss;
   shaderGroups.push_back(group);
 
-  // Miss AO
+  // Miss Ao
   group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
   group.generalShader = eMissAO;
   shaderGroups.push_back(group);
@@ -542,58 +561,75 @@ void RendererRayTraceTriangles::initRayTracingPipeline(Resources& res)
   group.closestHitShader = eClosestHit;
   shaderGroups.push_back(group);
 
-  // Push constant: we want to be able to update constants used by the shaders
-  //const VkPushConstantRange push_constant{VK_SHADER_STAGE_ALL, 0, sizeof(DH::PushConstant)};
-
-  // Descriptor sets: one specific to ray tracing, and one shared with the rasterization pipeline
-  std::vector<VkDescriptorSetLayout> dsetLayouts = {m_dsetContainer.getLayout()};  // , m_pContainer[eGraphic].dstLayout};
-  VkPipelineLayoutCreateInfo layoutCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  layoutCreateInfo.setLayoutCount         = static_cast<uint32_t>(dsetLayouts.size());
-  layoutCreateInfo.pSetLayouts            = dsetLayouts.data();
-  layoutCreateInfo.pushConstantRangeCount = 0;  //1;
-  //pipeline_layout_create_info.pPushConstantRanges    = &push_constant,
-
-  vkCreatePipelineLayout(res.m_device, &layoutCreateInfo, nullptr, &p.layout);
-
   // Assemble the shader stages and recursion depth info into the ray tracing pipeline
-  VkRayTracingPipelineCreateInfoKHR pipelineInfo{VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
-  pipelineInfo.stageCount                   = static_cast<uint32_t>(stages.size());
-  pipelineInfo.pStages                      = stages.data();
-  pipelineInfo.groupCount                   = static_cast<uint32_t>(shaderGroups.size());
-  pipelineInfo.pGroups                      = shaderGroups.data();
-  pipelineInfo.maxPipelineRayRecursionDepth = 2;
-  pipelineInfo.layout                       = p.layout;
+  VkRayTracingPipelineCreateInfoKHR rayPipelineInfo{
+      .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+      .stageCount                   = uint32_t(eShaderGroupCount),
+      .pStages                      = stages.data(),
+      .groupCount                   = static_cast<uint32_t>(shaderGroups.size()),
+      .pGroups                      = shaderGroups.data(),
+      .maxPipelineRayRecursionDepth = 2,
+      .layout                       = m_pipelineLayout,
+  };
 
-  vkCreateRayTracingPipelinesKHR(res.m_device, {}, {}, 1, &pipelineInfo, nullptr, &p.plines[0]);
+  NVVK_CHECK(vkCreateRayTracingPipelinesKHR(res.m_device, {}, {}, 1, &rayPipelineInfo, nullptr, &m_pipelines.rayTracing));
+  NVVK_DBG_NAME(m_pipelines.rayTracing);
 
   // Creating the SBT
-  m_rtSbt.setup(res.m_device, res.m_queueFamily, &res.m_allocator, m_rtProperties);
-  m_rtSbt.create(p.plines[0], pipelineInfo);
+  {
+    // Shader Binding Table (SBT) setup
+    nvvk::SBTGenerator sbtGenerator;
+    sbtGenerator.init(res.m_device, m_rtProperties);
+
+    // Prepare SBT data from ray pipeline
+    size_t bufferSize = sbtGenerator.calculateSBTBufferSize(m_pipelines.rayTracing, rayPipelineInfo);
+
+    // Create SBT buffer using the size from above
+    NVVK_CHECK(res.m_allocator.createBuffer(m_sbtBuffer, bufferSize, VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR,
+                                            VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, sbtGenerator.getBufferAlignment()));
+    NVVK_DBG_NAME(m_sbtBuffer.buffer);
+
+    nvvk::StagingUploader uploader;
+    uploader.init(&res.m_allocator);
+
+    void* mapping = nullptr;
+    NVVK_CHECK(uploader.appendBufferMapping(m_sbtBuffer, 0, bufferSize, mapping));
+    NVVK_CHECK(sbtGenerator.populateSBTBuffer(m_sbtBuffer.address, bufferSize, mapping));
+
+    VkCommandBuffer cmd = res.createTempCmdBuffer();
+    uploader.cmdUploadAppended(cmd);
+    res.tempSyncSubmit(cmd);
+    uploader.deinit();
+
+    // Retrieve the regions, which are using addresses based on the m_sbtBuffer.address
+    m_sbtRegions = sbtGenerator.getSBTRegions();
+
+    sbtGenerator.deinit();
+  }
 }
 
 
 void RendererRayTraceTriangles::deinit(Resources& res)
 {
-  deinitBasics(res);
+  res.destroyPipelines(m_pipelines);
+  vkDestroyPipelineLayout(res.m_device, m_pipelineLayout, nullptr);
 
-  res.destroy(m_blasScratchBuffer);
+  m_dsetPack.deinit();
+
+  res.m_allocator.destroyBuffer(m_blasScratchBuffer);
 
   for(auto& b : m_blas)
   {
-    res.destroy(b);
+    res.m_allocator.destroyAcceleration(b);
   }
 
-  res.destroy(m_tlasInstancesBuffer);
-  res.destroy(m_tlasScratchBuffer);
-  res.destroy(m_tlas);
+  res.m_allocator.destroyBuffer(m_tlasInstancesBuffer);
+  res.m_allocator.destroyBuffer(m_tlasScratchBuffer);
+  res.m_allocator.destroyAcceleration(m_tlas);
 
+  res.m_allocator.destroyBuffer(m_sbtBuffer);
 
-  m_rtSbt.destroy();               // Shading binding table wrapper
-  m_rtPipe.destroy(res.m_device);  // Hold pipelines and layout
-
-  res.destroyShaders(m_shaders);
-
-  m_dsetContainer.deinit();
+  deinitBasics(res);
 }
 
 std::unique_ptr<Renderer> makeRendererRayTraceTriangles()
@@ -607,8 +643,9 @@ void RendererRayTraceTriangles::updatedFrameBuffer(Resources& res)
   std::array<VkWriteDescriptorSet, 1> writeSets;
   VkDescriptorImageInfo               renderTargetInfo;
   renderTargetInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  renderTargetInfo.imageView   = res.m_framebuffer.viewColor;
-  writeSets[0]                 = m_dsetContainer.makeWrite(0, BINDINGS_RENDER_TARGET, &renderTargetInfo);
+  renderTargetInfo.imageView   = res.m_frameBuffer.imgColor.descriptor.imageView;
+  writeSets[0]                 = m_dsetPack.getWriteSet(BINDINGS_RENDER_TARGET);
+  writeSets[0].pImageInfo      = &renderTargetInfo;
 
   vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
 }

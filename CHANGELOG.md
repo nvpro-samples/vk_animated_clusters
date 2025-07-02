@@ -1,6 +1,10 @@
 # Changelog for vk_animated_clusters
+* 2025/6/26:
+  * Updated `nv_cluster_library` submodule with new API and proper vertex limit support.
+* 2025/6/23:
+  * Updated to use `nvpro_core2`, as result command-line arguments are now prefixed with `--` rather than just `-`. It is recommended to delete existing `/_build` or the CMake cache prior building or generating new solutions.
 * 2025/6/17:
-  * Updated `meshoptimizer` library to `v 0.24` using `meshopt_buildMeshletsSpatial` for improved ray tracing clusterization.
+  * Updated `meshoptimizer` submodule to `v 0.24` using `meshopt_buildMeshletsSpatial` for improved ray tracing clusterization.
 * 2025/5/28:
   * Reduce memory consumption when animation is disabled: allocate normals, clas and blas only once per unique geometry.
 * 2025/4/30:

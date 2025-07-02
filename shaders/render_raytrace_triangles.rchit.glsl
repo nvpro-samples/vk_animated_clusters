@@ -36,7 +36,7 @@
 
 /////////////////////////////////
 
-layout(std140, binding = BINDINGS_FRAME_UBO, set = 0) uniform frameConstantsBuffer
+layout(scalar, binding = BINDINGS_FRAME_UBO, set = 0) uniform frameConstantsBuffer
 {
   FrameConstants view;
 };
@@ -119,7 +119,7 @@ void main()
     visClusterID = 1 + gl_PrimitiveID;
   }
 
-  vec3 directionToLight = view.skyParams.directionToLight;
+  vec3 directionToLight = view.skyParams.sunDirection;
   float ambientOcclusion = ambientOcclusion(wPos, wNrm, view.ambientOcclusionRays, view.ambientOcclusionRadius * view.sceneSize);
 
   float sunContribution = 1.0;

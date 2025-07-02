@@ -21,7 +21,8 @@
 
 #include <memory>
 
-#include <nvvk/compute_vk.hpp>
+#include <nvvk/acceleration_structures.hpp>
+#include <nvvk/compute_pipeline.hpp>
 
 #include "resources.hpp"
 #include "scene.hpp"
@@ -54,7 +55,7 @@ class Renderer
 {
 public:
   virtual bool init(Resources& res, Scene& scene, const RendererConfig& config) = 0;
-  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler) = 0;
+  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler) = 0;
   virtual void deinit(Resources& res) = 0;
   virtual ~Renderer() {};  // Defined only so that inherited classes also have virtual destructors. Use deinit().
   virtual void updatedFrameBuffer(Resources& res) {};
@@ -80,7 +81,7 @@ protected:
   void initBasics(Resources& res, Scene& scene, const RendererConfig& config);
   void deinitBasics(Resources& res);
 
-  void updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler);
+  void updateAnimation(VkCommandBuffer cmd, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler);
 
   void initRayTracingTlas(Resources& res, Scene& scene, const RendererConfig& config, const VkAccelerationStructureKHR* blas = nullptr);
   void updateRayTracingTlas(VkCommandBuffer cmd, Resources& res, Scene& scene, bool update = false);
@@ -89,29 +90,35 @@ protected:
 
   struct BasicShaders
   {
-    nvvk::ShaderModuleID animVertexShader;
-    nvvk::ShaderModuleID animNormalShader;
+    shaderc::SpvCompilationResult animComputeVertices;
+    shaderc::SpvCompilationResult animComputeNormals;
   } m_basicShaders;
 
-  nvvk::PushComputeDispatcher<shaderio::AnimationConstants, uint32_t, 2> m_animDispatcher;
-
-  struct RenderInstanceBuffers
+  struct BasicPipelines
   {
-    RBuffer positions;
-    RBuffer normals;
+    VkPipeline animComputeNormals{};
+    VkPipeline animComputeVertices{};
+  } m_basicPipelines;
+
+  VkPipelineLayout m_animPipelineLayout{};
+
+  struct RenderInstanceData
+  {
+    nvvk::Buffer positions;
+    nvvk::Buffer normals;
   };
 
   std::vector<uint32_t> m_geometryFirstInstance;
 
   std::vector<shaderio::RenderInstance> m_renderInstances;
-  RBuffer                               m_renderInstanceBuffer;
-  std::vector<RenderInstanceBuffers>    m_renderInstanceBuffers;
+  nvvk::Buffer                          m_renderInstanceBuffer;
+  std::vector<RenderInstanceData>       m_renderInstanceBuffers;
 
-  RBuffer                                     m_tlasInstancesBuffer;
-  VkAccelerationStructureGeometryKHR          m_tlasGeometry;
-  VkAccelerationStructureBuildGeometryInfoKHR m_tlasBuildInfo;
-  RBuffer                                     m_tlasScratchBuffer;
-  nvvk::AccelKHR                              m_tlas;
+  nvvk::Buffer                                m_tlasInstancesBuffer;
+  VkAccelerationStructureGeometryKHR          m_tlasGeometry{};
+  VkAccelerationStructureBuildGeometryInfoKHR m_tlasBuildInfo{};
+  nvvk::Buffer                                m_tlasScratchBuffer;
+  nvvk::AccelerationStructure                 m_tlas;
 
   ResourceUsageInfo m_resourceUsageInfo{};
 };

@@ -76,7 +76,7 @@ vec4 shading(uint instanceID, vec3 wPos, vec3 wNormal, uint clusterID, float ove
   vec3 overheadLightColor = view.skyParams.lightRadiance;
   vec3  overheadLighting       = vec3(overheadLightIntensity * overheadLight * overheadLightColor);
   {
-    vec3 lightDir = normalize(view.skyParams.directionToLight);
+    vec3 lightDir = normalize(view.skyParams.sunDirection);
     vec3 reflDir  = normalize(-reflect(lightDir, normal));
     float diffuse    = max(0, dot(normal, lightDir));
     float specular   = pow(max(0, dot(reflDir, eyeDir)), 16) * 0.3;
@@ -157,83 +157,6 @@ vec3 addWireframe(vec3 color, vec3 barycentrics, bool frontFacing, vec3 barycent
   // Final color
   return mix(color, wireColor, lineWidth);
 }
-
-
-uvec2 digits[] = { uvec2(706880028, 471999018),  uvec2(136845320, 1040713736), uvec2(67248668, 1042288648),
-                  uvec2(201466396, 471990786),  uvec2(302646786, 33701666),   uvec2(1008738366, 471990786),
-                  uvec2(1008734220, 471999010), uvec2(67371582, 269486088),   uvec2(471999004, 471999010),
-                  uvec2(572662300, 402915870) };
-
-bool isDigit(uvec2 coord, uint number)
-{
-  number = clamp(number, 0, 9);
-  if (coord.y < 1)
-  {
-    return false;
-  }
-  if (coord.x < 1)
-  {
-    return false;
-  }
-
-  uint part;
-  uint yOffset;
-  coord.y = 8 - coord.y;
-  if (coord.y > 3)
-  {
-    part = digits[number].y;
-    yOffset = 4;
-  }
-  else
-  {
-    part = digits[number].x;
-    yOffset = 0;
-  }
-  return ((part >> (8 * (coord.y - yOffset) + (8 - coord.x))) & 0x1) == 1;
-}
-
-uint log10(uint n)
-{
-  uint l = 0;
-  while (n >= 10)
-  {
-    l++;
-    n /= 10;
-  }
-  return l;
-}
-
-// Return true if the pixel at the coordinate fromAnchor relative to the anchor point
-// is covered by a glyph from number
-bool isNumber(uvec2 fromAnchor, uvec2 availableSize, uint number)
-{
-  uint baseDigitSize = 8;
-  uint digitCount = log10(number) + 1;
-
-  fromAnchor += (availableSize) / 2;
-
-  uint realDigitWidth = availableSize.x / digitCount;
-
-  uint digitIndex = (fromAnchor.x / realDigitWidth);
-
-  for (uint i = 1; i < digitCount - digitIndex; i++)
-  {
-    number /= 10;
-  }
-  number = number % 10;
-
-  uvec2 digitStart = uvec2(fromAnchor.x - digitIndex * realDigitWidth, fromAnchor.y);
-  digitStart = (digitStart * baseDigitSize) / realDigitWidth;
-  digitStart.y = baseDigitSize - digitStart.y;
-  digitStart = clamp(digitStart, uvec2(0), uvec2(baseDigitSize));
-
-  return isDigit(digitStart, number);
-}
-
-
-
-
-
 
 #if SUPPORTS_RT == 1
 

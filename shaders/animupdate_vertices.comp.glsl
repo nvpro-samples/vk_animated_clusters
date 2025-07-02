@@ -65,7 +65,7 @@ void main()
 {
   uint32_t index = gl_GlobalInvocationID.x;
 
-  RenderInstance instance = RenderInstances_in(constants.renderInstances).d[constants.instanceIndex];
+  RenderInstance instance = constants.instances.d[constants.instanceIndex];
 
 
   if(index >= instance.numVertices)

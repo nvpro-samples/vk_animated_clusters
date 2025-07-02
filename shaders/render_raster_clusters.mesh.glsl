@@ -38,7 +38,7 @@ layout(push_constant) uniform pushData
   uint instanceID;
 } push;
 
-layout(std140, binding = BINDINGS_FRAME_UBO, set = 0) uniform frameConstantsBuffer
+layout(scalar, binding = BINDINGS_FRAME_UBO, set = 0) uniform frameConstantsBuffer
 {
   FrameConstants view;
 };
@@ -79,7 +79,7 @@ layout(location=0) out Interpolants {
 #define CLUSTER_DEDICATED_VERTICES 0
 #endif
 
-layout(local_size_x=MESHSHADER_WORKGROUP_SIZE) in;
+layout(local_size_x=32) in;
 layout(max_vertices=CLUSTER_VERTEX_COUNT, max_primitives=CLUSTER_TRIANGLE_COUNT) out;
 layout(triangles) out;
 

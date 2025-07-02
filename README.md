@@ -91,7 +91,7 @@ instantiated CLAS size, this allows us to reduce the amount of the required rese
 
 ## VK_NV_cluster_acceleration_structure
 
-The API details are found within [vk_nv_cluster_acc.h](src/vk_nv_cluster_acc.h)
+The API details are found at the [Khronos extension registry](https://registry.khronos.org/vulkan/specs/latest/man/html/VK_NV_cluster_acceleration_structure.html)
 
 ### Principle
 
@@ -239,25 +239,21 @@ The ray tracing is generally the same as for regular TLAS/BLAS-based ray tracing
 * `ClusterID` is a user-defined value provided at CLAS build time
 * `GeometryIndex` is a user-defined value provided at CLAS build time. We highly recommend keeping it constant per cluster, or when required use values that require only few bits overall.
 
-
 ## Problem-Solving
 
 The technology being quite new, we might not have ironed out all issues. If you experience instabilities, please let us know through GitHub Issues.
 You can use the commandline to change some defaults:
 
-* `-renderer 0` starts with rasterization of triangles.
-* `-supersample 0` disables the super sampling that otherwise doubles rendering resolution in each dimension. 
-* `-gridcopies N` set the number of model copies in the scene.
-* `-vsync 0` disable vsync. If changing vsync via UI does not work, try to use the driver's *NVIDIA Control Panel* and set `Vulkan/OpenGL present method: native`.
-
+* `--renderer 0` starts with rasterization of triangles.
+* `--supersample 0` disables the super sampling that otherwise doubles rendering resolution in each dimension. 
+* `--gridcopies N` set the number of model copies in the scene.
+* `--vsync 0` disable vsync. If changing vsync via UI does not work, try to use the driver's *NVIDIA Control Panel* and set `Vulkan/OpenGL present method: native`.
 
 ## Limitations
 
 * The `ClusterID` can only be accessed in shaders using `gl_ClusterIDNV` after enabling `VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV::allowClusterAccelerationStructure` for that pipeline. We use `GL_EXT_spirv_intrinsics` rather than dedicated GLSL extension support that may come at a later time.
 * Few error checks are performed on out of memory situations, which can happen on higher _"render copies"_ values, or the complexity of the loaded scene:
   * The cluster CLAS build is switching automatically to explicit mode, using one buffer per render-instance, to avoid exceeding 4GB limitations.
-* If the cluster library generates clusters > 256 vertices, scene loading will fail. This should be addressed in future versions.
-* Sometimes toggling vsync might not work properly, use `-vsync 0` commandline to start with vsync off, or try to use the driver's *NVIDIA Control Panel* and set `Vulkan/OpenGL present method: native`.
 * Enabling "Triangles" visualization for `raster triangles` renderer is disabled, as it would cost too much performance for regular vertex-shaders to generate per-primitive outputs.
 
 ## Building and Running
@@ -270,8 +266,8 @@ We recommend starting with a `Release` build, as the `Debug` build has a lot mor
 
 The cmake setup will download the `Stanford Bunny` glTF 2.0 model that serves as default scene.
 
-It will also look for [`nvpro_core`](https://github.com/nvpro-samples/nvpro_core) either as subdirectory of the current project directory, or up to two levels above. If it is not found, it will automatically download the git repo into `/build/_deps`.
-Note, that the repository of `nvpro_core` needs to be updated manually in case the sample is updated manually, as version mismatches could occur over time.
+It will also look for [`nvpro_core2`](https://github.com/nvpro-samples/nvpro_core2) either as subdirectory of the current project directory, or up to two levels above. If it is not found, it will automatically download the git repo into `/build/_deps`.
+Note, that the repository of `nvpro_core2` needs to be updated manually in case the sample is updated manually, as version mismatches could occur over time.
 
 The Vulkan validation layers may interfere with extensions it doesn't know about, therefore it is currently disabled in debug builds.
 This will be changed with future Vulkan SDKs.

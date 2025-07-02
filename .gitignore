@@ -20,7 +20,9 @@
 cmake_built
 cmake_build
 build
-_install
+_bin/
+_install/
 bin_x64
 downloaded_resources/
+_downloaded_resources/
 zbsgfxpack.lua

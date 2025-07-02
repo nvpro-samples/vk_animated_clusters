@@ -21,7 +21,9 @@
 
 #include <glm/gtc/type_ptr.hpp>
 #include <cgltf.h>
-#include <nvh/filemapping.hpp>
+#include <nvutils/file_mapping.hpp>
+#include <nvutils/file_operations.hpp>
+#include <nvutils/parallel_work.hpp>
 
 #include "scene.hpp"
 
@@ -30,8 +32,8 @@ struct FileMappingList
 {
   struct Entry
   {
-    nvh::FileReadMapping mapping;
-    int64_t              refCount = 1;
+    nvutils::FileReadMapping mapping;
+    int64_t                  refCount = 1;
   };
   std::unordered_map<std::string, Entry>       m_nameToMapping;
   std::unordered_map<const void*, std::string> m_dataToName;
@@ -183,8 +185,10 @@ void addInstancesFromNode(std::vector<animatedclusters::Scene::Instance>& instan
 
 
 namespace animatedclusters {
-bool Scene::loadGLTF(const char* filename)
+bool Scene::loadGLTF(ProcessingInfo& processingInfo, const std::filesystem::path& filePath)
 {
+  std::string fileName = nvutils::utf8FromPath(filePath);
+
   // Parse the glTF file using cgltf
   cgltf_options options = {};
 
@@ -199,7 +203,7 @@ bool Scene::loadGLTF(const char* filename)
     // We have this local pointer followed by an ownership transfer here
     // because cgltf_parse_file takes a pointer to a pointer to cgltf_data.
     cgltf_data* rawData = nullptr;
-    cgltfResult         = cgltf_parse_file(&options, filename, &rawData);
+    cgltfResult         = cgltf_parse_file(&options, fileName.c_str(), &rawData);
     data                = unique_cgltf_ptr(rawData, &cgltf_free);
   }
   // Check for errors; special message for legacy files
@@ -229,7 +233,7 @@ bool Scene::loadGLTF(const char* filename)
   }
 
   // For now, also tell cgltf to go ahead and load all buffers.
-  cgltfResult = cgltf_load_buffers(&options, data.get(), filename);
+  cgltfResult = cgltf_load_buffers(&options, data.get(), fileName.c_str());
   if(cgltfResult != cgltf_result_success)
   {
     LOGE(
@@ -241,16 +245,15 @@ bool Scene::loadGLTF(const char* filename)
 
   m_geometries.resize(data->meshes_count);
 
-  for(size_t meshIdx = 0; meshIdx < data->meshes_count; meshIdx++)
-  {
+  auto fnLoadAndProcessGeometry = [&](uint64_t meshIdx, uint32_t threadOuterIdx) {
     const cgltf_mesh gltfMesh = data->meshes[meshIdx];
-    Geometry&        geom     = m_geometries[meshIdx];
-    geom.bbox                 = {{FLT_MAX, FLT_MAX, FLT_MAX}, {-FLT_MAX, -FLT_MAX, -FLT_MAX}};
+    Geometry&        geometry = m_geometries[meshIdx];
+    geometry.bbox             = {{FLT_MAX, FLT_MAX, FLT_MAX}, {-FLT_MAX, -FLT_MAX, -FLT_MAX}};
 
 
     // count pass
-    geom.numTriangles = 0;
-    geom.numVertices  = 0;
+    geometry.numTriangles = 0;
+    geometry.numVertices  = 0;
     for(size_t primIdx = 0; primIdx < gltfMesh.primitives_count; primIdx++)
     {
       cgltf_primitive* gltfPrim = &gltfMesh.primitives[primIdx];
@@ -274,16 +277,16 @@ bool Scene::loadGLTF(const char* filename)
         // TODO: Can we assume alignment in order to make these a single read_float call?
         if(strcmp(gltfAttrib.name, "POSITION") == 0)
         {
-          geom.numVertices += (uint32_t)accessor->count;
+          geometry.numVertices += (uint32_t)accessor->count;
           break;
         }
       }
 
-      geom.numTriangles += (uint32_t)gltfPrim->indices->count / 3;
+      geometry.numTriangles += (uint32_t)gltfPrim->indices->count / 3;
     }
 
-    geom.positions.resize(geom.numVertices);
-    geom.triangles.resize(geom.numTriangles);
+    geometry.positions.resize(geometry.numVertices);
+    geometry.triangles.resize(geometry.numTriangles);
 
     // fill pass
 
@@ -315,7 +318,7 @@ bool Scene::loadGLTF(const char* filename)
         // TODO: Can we assume alignment in order to make these a single read_float call?
         if(strcmp(gltfAttrib.name, "POSITION") == 0)
         {
-          glm::vec3* writePositions = geom.positions.data() + offsetVertices;
+          glm::vec3* writePositions = geometry.positions.data() + offsetVertices;
 
           if(accessor->component_type == cgltf_component_type_r_32f && accessor->type == cgltf_type_vec3
              && accessor->stride == sizeof(glm::vec3))
@@ -325,8 +328,8 @@ bool Scene::loadGLTF(const char* filename)
             {
               glm::vec3 tmp     = readPositions[i];
               writePositions[i] = tmp;
-              geom.bbox.lo      = glm::min(geom.bbox.lo, tmp);
-              geom.bbox.hi      = glm::max(geom.bbox.hi, tmp);
+              geometry.bbox.lo  = glm::min(geometry.bbox.lo, tmp);
+              geometry.bbox.hi  = glm::max(geometry.bbox.hi, tmp);
             }
           }
           else
@@ -336,8 +339,8 @@ bool Scene::loadGLTF(const char* filename)
               glm::vec3 tmp;
               cgltf_accessor_read_float(accessor, i, &tmp.x, 3);
               writePositions[i] = tmp;
-              geom.bbox.lo      = glm::min(geom.bbox.lo, tmp);
-              geom.bbox.hi      = glm::max(geom.bbox.hi, tmp);
+              geometry.bbox.lo  = glm::min(geometry.bbox.lo, tmp);
+              geometry.bbox.hi  = glm::max(geometry.bbox.hi, tmp);
             }
           }
 
@@ -351,7 +354,7 @@ bool Scene::loadGLTF(const char* filename)
       {
         const cgltf_accessor* accessor = gltfPrim->indices;
 
-        uint32_t* writeIndices = (uint32_t*)(geom.triangles.data() + offsetTriangles);
+        uint32_t* writeIndices = (uint32_t*)(geometry.triangles.data() + offsetTriangles);
 
         if(offsetVertices == 0 && accessor->component_type == cgltf_component_type_r_32u
            && accessor->type == cgltf_type_scalar && accessor->stride == sizeof(uint32_t))
@@ -372,7 +375,17 @@ bool Scene::loadGLTF(const char* filename)
 
       offsetVertices += numVertices;
     }
-  }
+
+    processGeometry(processingInfo, geometry);
+
+    processingInfo.logCompletedGeometry();
+  };
+
+
+  processingInfo.setupParallelism(data->meshes_count);
+  processingInfo.logBegin();
+  nvutils::parallel_batches_pooled<1>(data->meshes_count, fnLoadAndProcessGeometry, processingInfo.numOuterThreads);
+  processingInfo.logEnd();
 
   if(data->scenes_count > 0)
   {
@@ -393,6 +406,24 @@ bool Scene::loadGLTF(const char* filename)
     }
   }
 
+
+  if(data->cameras_count > 0)
+  {
+    for(size_t nodeIdx = 0; nodeIdx < data->nodes_count; nodeIdx++)
+    {
+      if(data->nodes[nodeIdx].camera != nullptr && data->nodes[nodeIdx].camera->type == cgltf_camera_type_perspective)
+      {
+        Camera cam{};
+        cam.fovy = data->nodes[nodeIdx].camera->data.perspective.yfov;
+        glm::mat4 worldNodeTransform(1);
+        cgltf_node_transform_world(&data->nodes[nodeIdx], glm::value_ptr(cam.worldMatrix));
+        cam.eye    = glm::vec3(cam.worldMatrix[3]);
+        cam.center = (m_bbox.hi + m_bbox.lo) * 0.5f;
+        cam.up     = {0, 1, 0};
+        m_cameras.push_back(cam);
+      }
+    }
+  }
   return true;
 }
 }  // namespace animatedclusters

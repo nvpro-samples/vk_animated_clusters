@@ -19,22 +19,18 @@
 
 #include <filesystem>
 
-#include <imgui/backends/imgui_vk_extra.h>
-#include <imgui/imgui_camera_widget.h>
-#include <imgui/imgui_orient.h>
-#include <implot.h>
-#include <nvh/fileoperations.hpp>
-#include <nvh/cameramanipulator.hpp>
-#include <nvh/misc.hpp>
-#include <glm/gtc/type_ptr.hpp>
-#include <glm/gtc/matrix_access.hpp>
-#include <nvvk/debug_util_vk.hpp>
-#include <nvvkhl/sky.hpp>
+#include <imgui/imgui.h>
+#include <imgui/imgui_internal.h>
+#include <implot/implot.h>
+#include <nvgui/camera.hpp>
+#include <nvgui/sky.hpp>
+#include <nvgui/property_editor.hpp>
+#include <nvgui/window.hpp>
 
 #include "animatedclusters.hpp"
-#include "vk_nv_cluster_acc.h"
 
 namespace animatedclusters {
+
 
 std::string formatMemorySize(size_t sizeInBytes)
 {
@@ -76,8 +72,70 @@ std::string formatMetric(size_t size)
   return fmt::format("{:.3} {}", fsize, units[currentUnit]);
 }
 
-void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const CallBacks& callbacks)
+template <typename T>
+void uiPlot(std::string plotName, std::string tooltipFormat, const std::vector<T>& data, const T& maxValue)
 {
+  ImVec2 plotSize = ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y / 2);
+
+  // Ensure minimum height to avoid overly squished graphics
+  plotSize.y = std::max(plotSize.y, ImGui::GetTextLineHeight() * 20);
+
+  const ImPlotFlags     plotFlags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_Crosshairs;
+  const ImPlotAxisFlags axesFlags = ImPlotAxisFlags_Lock | ImPlotAxisFlags_NoLabel;
+  const ImColor         plotColor = ImColor(0.07f, 0.9f, 0.06f, 1.0f);
+
+  if(ImPlot::BeginPlot(plotName.c_str(), plotSize, plotFlags))
+  {
+    ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_NoButtons);
+    ImPlot::SetupAxes(nullptr, "Count", axesFlags, axesFlags);
+    ImPlot::SetupAxesLimits(0, static_cast<double>(data.size()), 0, static_cast<double>(maxValue), ImPlotCond_Always);
+
+    ImPlot::PushStyleVar(ImPlotStyleVar_FillAlpha, 0.25f);
+    ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
+    ImPlot::SetNextFillStyle(plotColor);
+    ImPlot::PlotShaded("", data.data(), (int)data.size(), -INFINITY, 1.0, 0.0, 0, 0);
+    ImPlot::PopStyleVar();
+
+    if(ImPlot::IsPlotHovered())
+    {
+      ImPlotPoint mouse       = ImPlot::GetPlotMousePos();
+      int         mouseOffset = (int(mouse.x)) % (int)data.size();
+      ImGui::BeginTooltip();
+      ImGui::Text(tooltipFormat.c_str(), mouseOffset, data[mouseOffset]);
+      ImGui::EndTooltip();
+    }
+
+    ImPlot::EndPlot();
+  }
+}
+
+void AnimatedClusters::viewportUI(ImVec2 corner)
+{
+  ImVec2     mouseAbsPos = ImGui::GetMousePos();
+  glm::uvec2 mousePos    = {mouseAbsPos.x - corner.x, mouseAbsPos.y - corner.y};
+
+  m_frameConfig.frameConstants.mousePosition = mousePos * glm::uvec2(m_tweak.supersample, m_tweak.supersample);
+}
+
+void AnimatedClusters::onUIRender()
+{
+  ImGuiWindow* viewport = ImGui::FindWindowByName("Viewport");
+
+  if(viewport)
+  {
+    if(nvgui::isWindowHovered(viewport))
+    {
+      if(ImGui::IsKeyDown(ImGuiKey_R))
+      {
+        m_reloadShaders = true;
+      }
+      if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsKeyPressed(ImGuiKey_Space))
+      {
+        m_requestCameraRecenter = true;
+      }
+    }
+  }
+
   bool earlyOut = !m_scene;
 
   if(earlyOut)
@@ -88,19 +146,14 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
   shaderio::Readback readback;
   m_resources.getReadbackData(readback);
 
-  bool isRightClick = m_mouseButtonHandler.getButtonState(ImGuiMouseButton_Right) == MouseButtonHandler::eSingleClick;
-
-  //TODO(JEM) the readback meshanism for picking is not fully functional yet, see with MKL
-  // In the current status of implementation the isReadbackValid is allways false
-  //
   // camera control, recenter
-  if(m_requestCameraRecenter && isReadbackValid(readback))
+  if(m_requestCameraRecenter && isPickingValid(readback))
   {
 
     glm::uvec2 mousePos = {m_frameConfig.frameConstants.mousePosition.x / m_tweak.supersample,
                            m_frameConfig.frameConstants.mousePosition.y / m_tweak.supersample};
 
-    const glm::mat4 view = CameraManip.getMatrix();
+    const glm::mat4 view = m_info.cameraManipulator->getViewMatrix();
     const glm::mat4 proj = m_frameConfig.frameConstants.projMatrix;
 
     float d = decodePickingDepth(readback);
@@ -113,20 +166,22 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
 
       // Set the interest position
       glm::vec3 eye, center, up;
-      CameraManip.getLookat(eye, center, up);
-      CameraManip.setLookat(eye, hitPos, up, false);
+      m_info.cameraManipulator->getLookat(eye, center, up);
+      m_info.cameraManipulator->setLookat(eye, hitPos, up, false);
     }
+
+    m_requestCameraRecenter = false;
   }
 
   // for emphasized parameter we want to recommend to the user
   const ImVec4 recommendedColor = ImVec4(0.0, 1.0, 0.0, 1.0);
   // for warnings
-  const ImVec4 warnColor = ImVec4(1.0, 0.7, 0.3, 1.0);
+  const ImVec4 warnColor = ImVec4(1.0f, 0.7f, 0.3f, 1.0f);
 
-  namespace PE = ImGuiH::PropertyEditor;
+  namespace PE = nvgui::PropertyEditor;
 
   ImGui::Begin("Settings");
-  ImGui::PushItemWidth(ImGuiH::dpiScaled(170));
+  ImGui::PushItemWidth(170 * ImGui::GetWindowDpiScale());
 
   if(ImGui::CollapsingHeader("Scene Modifiers", nullptr))  // default closed
   {
@@ -153,7 +208,8 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
     {
       ImGui::PushStyleColor(ImGuiCol_Text, warnColor);
     }
-    PE::Text("Render Resolution:", "%d x %d", m_resources.m_framebuffer.renderWidth, m_resources.m_framebuffer.renderHeight);
+    PE::Text("Render Resolution",
+             fmt::format("{} x {}", m_resources.m_frameBuffer.renderSize.width, m_resources.m_frameBuffer.renderSize.height));
     if(isRayTracing && m_tweak.supersample > 1)
     {
       ImGui::PopStyleColor();
@@ -202,11 +258,11 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
     PE::Checkbox("Use NV cluster library", &m_sceneConfig.clusterNvLibrary,
                  "uses the nv_cluster_builder library, otherwise meshoptimizer");
     ImGui::BeginDisabled(!m_sceneConfig.clusterNvLibrary);
-    PE::InputFloat("NV graph weight", &m_sceneConfig.clusterNvGraphWeight, 0.01f, 0.01f, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue,
-                   "non-zero weight makes use of triangle connectivity, otherwise disabled");
-    PE::InputFloat("NV cost underfill", &m_sceneConfig.clusterNvUnderfill, 0.01f, 0.01f, "%.3f",
-                   ImGuiInputTextFlags_EnterReturnsTrue, "cost to underfilling a cluster");
-    PE::InputFloat("NV cost overlap", &m_sceneConfig.clusterNvOverlap, 0.01f, 0.01f, "%.3f",
+    PE::InputFloat("NV cost underfill tris", &m_sceneConfig.clusterNvConfig.costUnderfill, 0.01f, 0.01f, "%.3f",
+                   ImGuiInputTextFlags_EnterReturnsTrue, "cost to underfilling triangles per cluster");
+    PE::InputFloat("NV cost underfill verts", &m_sceneConfig.clusterNvConfig.costUnderfillVertices, 0.01f, 0.01f,
+                   "%.3f", ImGuiInputTextFlags_EnterReturnsTrue, "cost to underfilling vertices per cluster");
+    PE::InputFloat("NV cost overlap", &m_sceneConfig.clusterNvConfig.costOverlap, 0.01f, 0.01f, "%.3f",
                    ImGuiInputTextFlags_EnterReturnsTrue, "cost to bounding box overlap between clusters");
     ImGui::EndDisabled();
     ImGui::BeginDisabled(m_sceneConfig.clusterNvLibrary);
@@ -339,7 +395,7 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
 
     if(ImGui::BeginTable("Memory stats", 3, ImGuiTableFlags_RowBg))
     {
-      ImGui::TableSetupColumn("Memory", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("Actual", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("Reserved", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableHeadersRow();
@@ -392,10 +448,10 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
   }
   if(ImGui::CollapsingHeader("Model Clusters "))
   {
-    ImGui::Text("Cluster triangle count: %d", m_scene->m_config.clusterTriangles);
-    ImGui::Text("Cluster vertex count: %d", m_scene->m_config.clusterVertices);
+    ImGui::Text("Cluster max triangle count: %d", m_scene->m_maxClusterTriangles);
+    ImGui::Text("Cluster max vertex count: %d", m_scene->m_maxClusterVertices);
     ImGui::Text("Cluster count: %d", m_scene->m_numClusters);
-    ImGui::Text("Clusters with max (%d) triangles: %d (%.1f%%)", m_scene->m_config.clusterTriangles,
+    ImGui::Text("Clusters with config (%d) triangles: %d (%.1f%%)", m_scene->m_config.clusterTriangles,
                 m_scene->m_clusterTriangleHistogram.back(),
                 float(m_scene->m_clusterTriangleHistogram.back()) * 100.f / float(m_scene->m_numClusters));
 
@@ -410,12 +466,12 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
 
   if(ImGui::CollapsingHeader("Camera", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
-    ImGuiH::CameraWidget();
+    nvgui::CameraWidget(m_info.cameraManipulator);
   }
 
   if(ImGui::CollapsingHeader("Lighting and Shading", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
-    namespace PE = ImGuiH::PropertyEditor;
+    namespace PE = nvgui::PropertyEditor;
 
     PE::begin();
     PE::SliderFloat("Light Mixer", &m_frameConfig.frameConstants.lightMixer, 0.0f, 1.0f, "%.3f", 0,
@@ -425,7 +481,7 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
     ImGui::TextDisabled("Sun & Sky");
     {
       PE::begin();
-      nvvkhl::skyParametersUI(m_frameConfig.frameConstants.skyParams);
+      nvgui::skySimpleParametersUI(m_frameConfig.frameConstants.skyParams);
       PE::end();
     }
   }
@@ -470,20 +526,14 @@ void AnimatedClusters::processUI(double time, nvh::Profiler& profiler, const Cal
   }
   ImGui::End();
 #endif
-}
 
-void AnimatedClusters::viewportUI(ImVec2 corner)
-{
-  if(ImGui::IsItemHovered())
-  {
-    const auto mouseAbsPos = ImGui::GetMousePos();
+  handleChanges();
 
-    glm::uvec2 mousePos = {mouseAbsPos.x - corner.x, mouseAbsPos.y - corner.y};
-
-    m_frameConfig.frameConstants.mousePosition = mousePos * glm::uvec2(m_tweak.supersample, m_tweak.supersample);
-    m_mouseButtonHandler.update(mousePos);
-    MouseButtonHandler::ButtonState leftButtonState = m_mouseButtonHandler.getButtonState(ImGuiMouseButton_Left);
-    m_requestCameraRecenter = (leftButtonState == MouseButtonHandler::eDoubleClick) || ImGui::IsKeyPressed(ImGuiKey_Space);
-  }
+  // Rendered image displayed fully in 'Viewport' window
+  ImGui::Begin("Viewport");
+  ImVec2 corner = ImGui::GetCursorScreenPos();  // Corner of the viewport
+  ImGui::Image((ImTextureID)m_imguiTexture, ImGui::GetContentRegionAvail());
+  viewportUI(corner);
+  ImGui::End();
 }
 }  // namespace animatedclusters
