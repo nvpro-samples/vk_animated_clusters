@@ -145,6 +145,7 @@ public:
   void onAttach(nvapp::Application* app) override;
   void onDetach() override;
   void onUIRender() override;
+  void onUIMenu() override;
   void onPreRender() override;
   void onRender(VkCommandBuffer cmd) override;
   void onResize(VkCommandBuffer cmd, const VkExtent2D& size) override;

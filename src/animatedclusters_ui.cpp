@@ -26,6 +26,7 @@
 #include <nvgui/sky.hpp>
 #include <nvgui/property_editor.hpp>
 #include <nvgui/window.hpp>
+#include <nvgui/file_dialog.hpp>
 
 #include "animatedclusters.hpp"
 
@@ -535,5 +536,22 @@ void AnimatedClusters::onUIRender()
   ImGui::Image((ImTextureID)m_imguiTexture, ImGui::GetContentRegionAvail());
   viewportUI(corner);
   ImGui::End();
+}
+
+void AnimatedClusters::onUIMenu()
+{
+  if(ImGui::BeginMenu("File"))
+  {
+    if(ImGui::MenuItem("Open", "Ctrl+O"))
+    {
+      std::filesystem::path filename =
+          nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load glTF", "glTF(.gltf, .glb)|*.gltf;*.glb");
+      if(!filename.empty())
+      {
+        onFileDrop(filename);
+      }
+    }
+    ImGui::EndMenu();
+  }
 }
 }  // namespace animatedclusters
