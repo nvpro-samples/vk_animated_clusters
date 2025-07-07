@@ -143,6 +143,8 @@ struct FrameConstants
   vec4 viewDir;
   vec4 viewPlane;
 
+  mat4 skyProjMatrixI;
+
   ivec2 viewport;
   vec2  viewportf;
 

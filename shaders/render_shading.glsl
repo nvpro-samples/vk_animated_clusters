@@ -73,8 +73,8 @@ vec4 shading(uint instanceID, vec3 wPos, vec3 wNormal, uint clusterID, float ove
   }
 
   // Overhead light
-  vec3 overheadLightColor = view.skyParams.lightRadiance;
-  vec3  overheadLighting       = vec3(overheadLightIntensity * overheadLight * overheadLightColor);
+  vec3 overheadLightColor = view.skyParams.sunColor * view.skyParams.sunIntensity;
+  vec3 overheadLighting   = vec3(overheadLightIntensity * overheadLight * overheadLightColor);
   {
     vec3 lightDir = normalize(view.skyParams.sunDirection);
     vec3 reflDir  = normalize(-reflect(lightDir, normal));

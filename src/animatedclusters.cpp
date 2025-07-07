@@ -439,7 +439,8 @@ void AnimatedClusters::handleChanges()
   bool shaderChanged = false;
   if(m_reloadShaders)
   {
-    shaderChanged = true;
+    shaderChanged   = true;
+    m_reloadShaders = false;
   }
 
   bool frameBufferChanged = false;
@@ -557,6 +558,10 @@ void AnimatedClusters::onRender(VkCommandBuffer cmd)
     frameConstants.viewMatrixI     = viewI;
     frameConstants.projMatrix      = projection;
     frameConstants.projMatrixI     = glm::inverse(projection);
+
+    glm::mat4 viewNoTrans         = view;
+    viewNoTrans[3]                = {0.0f, 0.0f, 0.0f, 1.0f};
+    frameConstants.skyProjMatrixI = glm::inverse(projection * viewNoTrans);
 
     glm::vec4 hPos   = projection * glm::vec4(1.0f, 1.0f, -frameConstants.farPlane, 1.0f);
     glm::vec2 hCoord = glm::vec2(hPos.x / hPos.w, hPos.y / hPos.w);

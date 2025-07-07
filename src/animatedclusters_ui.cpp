@@ -480,11 +480,7 @@ void AnimatedClusters::onUIRender()
     PE::end();
 
     ImGui::TextDisabled("Sun & Sky");
-    {
-      PE::begin();
-      nvgui::skySimpleParametersUI(m_frameConfig.frameConstants.skyParams);
-      PE::end();
-    }
+    nvgui::skySimpleParametersUI(m_frameConfig.frameConstants.skyParams);
   }
 
   ImGui::End();
