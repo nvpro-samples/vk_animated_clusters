@@ -126,9 +126,9 @@ void AnimatedClusters::updateImguiImage()
 }
 
 const AnimatedClusters::ClusterInfo AnimatedClusters::s_clusterInfos[NUM_CLUSTER_CONFIGS] = {
-    {32, 32, CLUSTER_32T_32V},     {64, 64, CLUSTER_64T_64V},     {64, 128, CLUSTER_64T_128V},
-    {64, 192, CLUSTER_64T_192V},   {96, 96, CLUSTER_96T_96V},     {128, 128, CLUSTER_128T_128V},
-    {128, 256, CLUSTER_128T_256V}, {256, 256, CLUSTER_256T_256V},
+    {64, 64, CLUSTER_64T_64V},     {64, 128, CLUSTER_64T_128V},   {64, 192, CLUSTER_64T_192V},
+    {96, 96, CLUSTER_96T_96V},     {128, 128, CLUSTER_128T_128V}, {128, 256, CLUSTER_128T_256V},
+    {256, 256, CLUSTER_256T_256V},
 };
 
 void AnimatedClusters::adjustSceneClusterConfig()

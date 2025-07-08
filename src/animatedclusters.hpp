@@ -45,7 +45,6 @@ public:
 
   enum ClusterConfig
   {
-    CLUSTER_32T_32V,
     CLUSTER_64T_64V,
     CLUSTER_64T_128V,
     CLUSTER_64T_192V,
