@@ -271,7 +271,7 @@ void AnimatedClusters::postInitNewScene()
 
   float radius = sceneDimension * 0.5f;
   m_info.cameraManipulator->setClipPlanes(glm::vec2(0.01F * radius, 100.0F * radius));
-  m_info.cameraManipulator->setSceneSize(sceneDimension);
+  m_info.cameraManipulator->setSpeed(radius);
 
   m_frameConfig.frameConstants.animationRippleEnabled   = 1;
   m_frameConfig.frameConstants.animationRippleFrequency = 50.f;
