@@ -240,7 +240,7 @@ void RendererRayTraceTriangles::render(VkCommandBuffer primary, Resources& res, 
     {
       vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelines.rayTracing);
       vkCmdBindDescriptorSets(primary, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1,
-                              m_dsetPack.sets.data(), 0, nullptr);
+                              m_dsetPack.getSets().data(), 0, nullptr);
 
       vkCmdTraceRaysKHR(primary, &m_sbtRegions.raygen, &m_sbtRegions.miss, &m_sbtRegions.hit, &m_sbtRegions.callable,
                         frame.frameConstants.viewport.x, frame.frameConstants.viewport.y, 1);
@@ -478,24 +478,25 @@ void RendererRayTraceTriangles::initRayTracingPipeline(Resources& res)
 
   VkShaderStageFlags stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
 
-  m_dsetPack.bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stageFlags);
-  m_dsetPack.bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
-  m_dsetPack.bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
-  m_dsetPack.bindings.addBinding(BINDINGS_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, stageFlags);
-  m_dsetPack.bindings.addBinding(BINDINGS_RENDER_TARGET, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stageFlags);
-  m_dsetPack.initFromBindings(device, 1);
+  nvvk::DescriptorBindings bindings;
+  bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stageFlags);
+  bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
+  bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stageFlags);
+  bindings.addBinding(BINDINGS_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, stageFlags);
+  bindings.addBinding(BINDINGS_RENDER_TARGET, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stageFlags);
+  NVVK_CHECK(m_dsetPack.init(bindings, device, 1));
 
-  nvvk::createPipelineLayout(device, &m_pipelineLayout, {m_dsetPack.layout});
+  nvvk::createPipelineLayout(device, &m_pipelineLayout, {m_dsetPack.getLayout()});
 
   VkDescriptorImageInfo renderTargetInfo = res.m_frameBuffer.imgColor.descriptor;
   renderTargetInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
 
   nvvk::WriteSetContainer writeSets;
-  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
-  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
-  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
-  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_TLAS), m_tlas);
-  writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDER_TARGET), renderTargetInfo);
+  writeSets.append(m_dsetPack.makeWrite(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
+  writeSets.append(m_dsetPack.makeWrite(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
+  writeSets.append(m_dsetPack.makeWrite(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
+  writeSets.append(m_dsetPack.makeWrite(BINDINGS_TLAS), m_tlas);
+  writeSets.append(m_dsetPack.makeWrite(BINDINGS_RENDER_TARGET), renderTargetInfo);
   vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
 
   enum StageIndices
@@ -644,7 +645,7 @@ void RendererRayTraceTriangles::updatedFrameBuffer(Resources& res)
   VkDescriptorImageInfo               renderTargetInfo;
   renderTargetInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
   renderTargetInfo.imageView   = res.m_frameBuffer.imgColor.descriptor.imageView;
-  writeSets[0]                 = m_dsetPack.getWriteSet(BINDINGS_RENDER_TARGET);
+  writeSets[0]                 = m_dsetPack.makeWrite(BINDINGS_RENDER_TARGET);
   writeSets[0].pImageInfo      = &renderTargetInfo;
 
   vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);

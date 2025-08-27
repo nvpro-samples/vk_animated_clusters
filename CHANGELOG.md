@@ -1,4 +1,6 @@
 # Changelog for vk_animated_clusters
+* 2025-8-24:
+  * Updated `meshoptimizer` submodule to `v 0.25`
 * 2025-7-7:
   * Fix regression with sky rendering & missing sky UI
 * 2025-6-26:

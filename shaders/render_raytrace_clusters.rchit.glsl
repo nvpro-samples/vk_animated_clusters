@@ -190,12 +190,12 @@ void main()
 
   vec3 wNrm = normalize(vec3(oNrm * gl_WorldToObjectEXT));
 
-  vec3 directionToLight = view.skyParams.sunDirection;
+  vec3 directionToLight  = view.skyParams.sunDirection;
   float ambientOcclusion = ambientOcclusion(wPos, wNrm, view.ambientOcclusionRays, view.ambientOcclusionRadius * view.sceneSize);
 
   float sunContribution = 1.0;
   if(view.doShadow == 1)
-    sunContribution = traceShadowRay(wPos, directionToLight);
+    sunContribution = traceShadowRay(wPos, wNrm, directionToLight);
 
   rayHit.color = shading(gl_InstanceID, wPos, wNrm, visClusterID, sunContribution, ambientOcclusion);
 

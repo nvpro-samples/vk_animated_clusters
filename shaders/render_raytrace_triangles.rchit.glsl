@@ -124,7 +124,7 @@ void main()
 
   float sunContribution = 1.0;
   if(view.doShadow == 1)
-    sunContribution = traceShadowRay(wPos, directionToLight);
+    sunContribution = traceShadowRay(wPos, wNrm, directionToLight);
 
   rayHit.color = shading(gl_InstanceID, wPos, wNrm, visClusterID, sunContribution, ambientOcclusion);
 
