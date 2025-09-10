@@ -473,11 +473,6 @@ void Scene::buildGeometryClusters(ProcessingInfo& processingInfo, Geometry& geom
   }
   else
   {
-    // first sort for vcache
-    std::vector<glm::uvec3> triangles = geometry.triangles;
-    meshopt_optimizeVertexCache((uint32_t*)geometry.triangles.data(), (uint32_t*)triangles.data(), triangles.size() * 3,
-                                geometry.numVertices);
-
     // we allow smaller clusters to be generated when that significantly improves their bounds
     size_t minTriangles = (m_config.clusterTriangles / 4) & ~3;
 
@@ -489,7 +484,7 @@ void Scene::buildGeometryClusters(ProcessingInfo& processingInfo, Geometry& geom
         meshopt_buildMeshletsSpatial(meshlets.data(), geometry.clusterLocalVertices.data(),
                                      geometry.clusterLocalTriangles.data(), (uint32_t*)geometry.triangles.data(),
                                      geometry.triangles.size() * 3, (float*)geometry.positions.data(),
-                                     geometry.numVertices, sizeof(glm::vec3), std::min(255u, m_config.clusterVertices),
+                                     geometry.numVertices, sizeof(glm::vec3), m_config.clusterVertices,
                                      minTriangles, m_config.clusterTriangles, m_config.clusterMeshoptSpatialFill);
 
     geometry.numClusters = uint32_t(numClusters);
