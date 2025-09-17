@@ -268,13 +268,20 @@ void RendererRayTraceTriangles::initRayTracingBlas(Resources& res, Scene& scene,
 
     VkAccelerationStructureGeometryTrianglesDataKHR triangles{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
 
-    triangles.vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT;
-    triangles.vertexData.deviceAddress = m_renderInstances[instanceIdx].positions;
-    triangles.vertexStride             = sizeof(glm::vec3);
-    triangles.maxVertex                = m_renderInstances[instanceIdx].numVertices - 1;
-    triangles.indexType                = VK_INDEX_TYPE_UINT32;
-    triangles.indexData.deviceAddress  = m_renderInstances[instanceIdx].triangles;
+    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    triangles.vertexStride = sizeof(glm::vec3);
+    triangles.indexType    = VK_INDEX_TYPE_UINT32;
 
+    if(instanceIdx != ~0)
+    {
+      triangles.vertexData.deviceAddress = m_renderInstances[instanceIdx].positions;
+      triangles.maxVertex                = m_renderInstances[instanceIdx].numVertices - 1;
+      triangles.indexData.deviceAddress  = m_renderInstances[instanceIdx].triangles;
+    }
+    else
+    {
+      triangles.maxVertex = 0;
+    }
 
     // Identify the above data as containing opaque triangles.
     VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
@@ -286,7 +293,7 @@ void RendererRayTraceTriangles::initRayTracingBlas(Resources& res, Scene& scene,
 
     VkAccelerationStructureBuildRangeInfoKHR offset{};
 
-    offset.primitiveCount  = m_renderInstances[instanceIdx].numTriangles;
+    offset.primitiveCount  = instanceIdx != ~0 ? m_renderInstances[instanceIdx].numTriangles : 0;
     offset.primitiveOffset = 0;
     offset.firstVertex     = 0;
     offset.transformOffset = 0;

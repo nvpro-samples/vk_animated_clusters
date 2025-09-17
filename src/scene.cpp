@@ -486,11 +486,17 @@ void Scene::buildGeometryClusters(ProcessingInfo& processingInfo, Geometry& geom
     geometry.clusterLocalVertices.resize(meshlets.size() * m_config.clusterVertices);
 
     size_t numClusters =
-        meshopt_buildMeshletsSpatial(meshlets.data(), geometry.clusterLocalVertices.data(),
-                                     geometry.clusterLocalTriangles.data(), (uint32_t*)geometry.triangles.data(),
-                                     geometry.triangles.size() * 3, (float*)geometry.positions.data(),
-                                     geometry.numVertices, sizeof(glm::vec3), std::min(255u, m_config.clusterVertices),
-                                     minTriangles, m_config.clusterTriangles, m_config.clusterMeshoptSpatialFill);
+        m_config.clusterMeshoptSpatialFill > 1.01f ?
+            meshopt_buildMeshletsFlex(meshlets.data(), geometry.clusterLocalVertices.data(),
+                                      geometry.clusterLocalTriangles.data(), (uint32_t*)geometry.triangles.data(),
+                                      geometry.triangles.size() * 3, (float*)geometry.positions.data(),
+                                      geometry.numVertices, sizeof(glm::vec3), std::min(255u, m_config.clusterVertices),
+                                      minTriangles, m_config.clusterTriangles, 0.0f, 2.0) :
+            meshopt_buildMeshletsSpatial(meshlets.data(), geometry.clusterLocalVertices.data(),
+                                         geometry.clusterLocalTriangles.data(), (uint32_t*)geometry.triangles.data(),
+                                         geometry.triangles.size() * 3, (float*)geometry.positions.data(),
+                                         geometry.numVertices, sizeof(glm::vec3), std::min(255u, m_config.clusterVertices),
+                                         minTriangles, m_config.clusterTriangles, m_config.clusterMeshoptSpatialFill);
 
     geometry.numClusters = uint32_t(numClusters);
 

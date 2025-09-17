@@ -268,7 +268,8 @@ void AnimatedClusters::onUIRender()
     ImGui::EndDisabled();
     ImGui::BeginDisabled(m_sceneConfig.clusterNvLibrary);
     PE::InputFloat("Meshopt fill weight", &m_sceneConfig.clusterMeshoptSpatialFill, 0.01f, 0.01f, "%.3f",
-                   ImGuiInputTextFlags_EnterReturnsTrue, "Bias full vs SaH optimal clusters");
+                   ImGuiInputTextFlags_EnterReturnsTrue,
+                   "Bias full vs SaH optimal clusters using spatial clustering. Value > 1.01f triggers flex clustering");
     ImGui::EndDisabled();
     PE::Checkbox("Optimize for triangle strips", &m_sceneConfig.clusterStripify,
                  "Re-order triangles within cluster optimizing for triangle strips");

@@ -49,6 +49,7 @@ public:
     glm::mat4      matrix;
     shaderio::BBox bbox;
     uint32_t       geometryID = ~0U;
+    uint32_t       materialID = 0;
   };
 
   struct Geometry

@@ -164,13 +164,29 @@ void addInstancesFromNode(std::vector<animatedclusters::Scene::Instance>& instan
   // If this node has a mesh, add instances for its primitives.
   if(node->mesh != nullptr)
   {
-    const ptrdiff_t meshIndex = (node->mesh) - data->meshes;
+    const ptrdiff_t       meshIndex   = (node->mesh) - data->meshes;
+    const cgltf_material* material    = node->mesh->primitives[0].material;
+    bool                  addInstance = true;
 
     animatedclusters::Scene::Instance instance{};
     instance.geometryID = uint32_t(meshIndex);
     instance.matrix     = nodeObjToWorldTransform;
 
-    instances.push_back(instance);
+    if(material)
+    {
+      instance.materialID = uint32_t(material - data->materials);
+
+      // filter out instances with blended materials for now
+      if(material->alpha_mode == cgltf_alpha_mode_blend)
+      {
+        addInstance = false;
+      }
+    }
+
+    if(addInstance)
+    {
+      instances.push_back(instance);
+    }
   }
 
   // Recurse over any children of this node.
