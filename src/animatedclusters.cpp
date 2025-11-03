@@ -58,7 +58,7 @@ AnimatedClusters::AnimatedClusters(const Info& info)
                                 &m_sceneConfig.processingThreadsPct);
 
   m_frameConfig.frameConstants                        = {};
-  m_frameConfig.frameConstants.ambientOcclusionRays   = 1;
+  m_frameConfig.frameConstants.ambientOcclusionRays   = 2;
   m_frameConfig.frameConstants.facetShading           = 1;
   m_frameConfig.frameConstants.doShadow               = 1;
   m_frameConfig.frameConstants.ambientOcclusionRadius = 0.1f;
@@ -280,10 +280,7 @@ void AnimatedClusters::postInitNewScene()
   m_frameConfig.frameConstants.animationTwistEnabled    = 1;
   m_frameConfig.frameConstants.animationTwistSpeed      = 0.1f;
   m_frameConfig.frameConstants.animationTwistMaxAngle   = 180.f;
-  m_frameConfig.frameConstants.doShadow                 = 1;
   m_frameConfig.frameConstants.ambientOcclusionRadius   = 0.1f;
-  m_frameConfig.frameConstants.ambientOcclusionRays     = 16;
-  m_frameConfig.frameConstants.lightMixer               = 0.5f;
   m_frameConfig.frameConstants.skyParams                = {};
 }
 
