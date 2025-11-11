@@ -20,21 +20,19 @@
 
 #include <vector>
 
-#include <nvcluster/nvcluster.h>
-
 #include "resources.hpp"
 
 namespace animatedclusters {
 struct SceneConfig
 {
-  uint32_t         clusterVertices           = 64;
-  uint32_t         clusterTriangles          = 64;
-  nvcluster_Config clusterNvConfig           = {};
-  float            clusterMeshoptSpatialFill = 0.5f;
+  uint32_t clusterVertices           = 64;
+  uint32_t clusterTriangles          = 64;
+  float    clusterMeshoptFlexSplit   = 2.0f;
+  float    clusterMeshoptFlexCone    = 0.0f;
+  float    clusterMeshoptSpatialFill = 0.5f;
 
   bool clusterDedicatedVertices = false;
-  bool clusterStripify          = true;
-  bool clusterNvLibrary         = false;
+  bool clusterSpatial           = true;
 
   // Influence the number of geometries that can be processed in parallel.
   // Percentage of threads of maximum hardware concurrency
@@ -121,8 +119,6 @@ private:
     // - either over geometries (outer loop)
     // - or within a geometry (inner loops)
 
-    nvcluster_Context clusterContext{};
-
     uint32_t numPoolThreadsOriginal = 1;
     uint32_t numPoolThreads         = 1;
 
@@ -132,13 +128,6 @@ private:
     size_t geometryCount = 0;
 
     std::mutex processOnlySaveMutex;
-
-    // some stats
-
-    std::atomic_uint64_t numTotalTriangles = 0;
-    std::atomic_uint64_t numTotalStrips    = 0;
-
-    std::mutex statsMutex;
 
     // logging progress
 
@@ -163,7 +152,7 @@ private:
   void processGeometry(ProcessingInfo& processingInfo, Geometry& geometry);
   void buildGeometryClusters(ProcessingInfo& processingInfo, Geometry& geometry);
   void buildGeometryClusterBboxes(ProcessingInfo& processingInfo, Geometry& geometry);
-  void buildGeometryClusterStrips(ProcessingInfo& processingInfo, Geometry& geometry);
+  void optimizeGeometryClusters(ProcessingInfo& processingInfo, Geometry& geometry);
   void buildGeometryClusterVertices(ProcessingInfo& processingInfo, Geometry& geometry);
   void rebuildGeometryTriangles(ProcessingInfo& processingInfo, Geometry& geometry);
 

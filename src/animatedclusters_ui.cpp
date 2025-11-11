@@ -256,23 +256,17 @@ void AnimatedClusters::onUIRender()
     PE::begin("##Clusters");
     PE::entry("Cluster/meshlet size",
               [&]() { return m_ui.enumCombobox(GUI_MESHLET, "##HiddenID", &m_tweak.clusterConfig); });
-    PE::Checkbox("Use NV cluster library", &m_sceneConfig.clusterNvLibrary,
-                 "uses the nv_cluster_builder library, otherwise meshoptimizer");
-    ImGui::BeginDisabled(!m_sceneConfig.clusterNvLibrary);
-    PE::InputFloat("NV cost underfill tris", &m_sceneConfig.clusterNvConfig.costUnderfill, 0.01f, 0.01f, "%.3f",
-                   ImGuiInputTextFlags_EnterReturnsTrue, "cost to underfilling triangles per cluster");
-    PE::InputFloat("NV cost underfill verts", &m_sceneConfig.clusterNvConfig.costUnderfillVertices, 0.01f, 0.01f,
-                   "%.3f", ImGuiInputTextFlags_EnterReturnsTrue, "cost to underfilling vertices per cluster");
-    PE::InputFloat("NV cost overlap", &m_sceneConfig.clusterNvConfig.costOverlap, 0.01f, 0.01f, "%.3f",
-                   ImGuiInputTextFlags_EnterReturnsTrue, "cost to bounding box overlap between clusters");
+    PE::Checkbox("Use spatial (RT)", &m_sceneConfig.clusterSpatial, "uses spatial builder, otherwise flex builder");
+    ImGui::BeginDisabled(!m_sceneConfig.clusterSpatial);
+    PE::InputFloat("Spatial fill weight", &m_sceneConfig.clusterMeshoptSpatialFill, 0.01f, 0.01f, "%.3f",
+                   ImGuiInputTextFlags_EnterReturnsTrue, "Bias full vs SaH optimal clusters using spatial clustering.");
     ImGui::EndDisabled();
-    ImGui::BeginDisabled(m_sceneConfig.clusterNvLibrary);
-    PE::InputFloat("Meshopt fill weight", &m_sceneConfig.clusterMeshoptSpatialFill, 0.01f, 0.01f, "%.3f",
-                   ImGuiInputTextFlags_EnterReturnsTrue,
-                   "Bias full vs SaH optimal clusters using spatial clustering. Value > 1.01f triggers flex clustering");
+    ImGui::BeginDisabled(m_sceneConfig.clusterSpatial);
+    PE::InputFloat("Flex split factor", &m_sceneConfig.clusterMeshoptFlexSplit, 0.01f, 0.01f, "%.3f",
+                   ImGuiInputTextFlags_EnterReturnsTrue, "Split a cluster if its relative spherical dimension exceeds this factor");
+    PE::InputFloat("Flex cone weight", &m_sceneConfig.clusterMeshoptFlexCone, 0.01f, 0.01f, "%.3f",
+                   ImGuiInputTextFlags_EnterReturnsTrue, "Influence of normal cone weight when clustering");
     ImGui::EndDisabled();
-    PE::Checkbox("Optimize for triangle strips", &m_sceneConfig.clusterStripify,
-                 "Re-order triangles within cluster optimizing for triangle strips");
     PE::Checkbox("Cluster-dedicated vertices", &m_sceneConfig.clusterDedicatedVertices,
                  "stores vertices per cluster, increases memory / animation work");
     PE::end();

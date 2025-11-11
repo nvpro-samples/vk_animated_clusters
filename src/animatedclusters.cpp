@@ -46,12 +46,11 @@ AnimatedClusters::AnimatedClusters(const Info& info)
   m_info.parameterRegistry->add({"gridcopies"}, &m_tweak.gridCopies);
   m_info.parameterRegistry->add({"gridconfig"}, &m_tweak.gridConfig);
   m_info.parameterRegistry->add({"clusterconfig"}, (int*)&m_tweak.clusterConfig);
-  m_info.parameterRegistry->add({"clusterstripify"}, &m_sceneConfig.clusterStripify);
   m_info.parameterRegistry->add({"clusterdedicatedvertices"}, &m_sceneConfig.clusterDedicatedVertices);
-  m_info.parameterRegistry->add({"nvcluster"}, &m_sceneConfig.clusterNvLibrary);
-  m_info.parameterRegistry->add({"nvclusterunderfill"}, &m_sceneConfig.clusterNvConfig.costUnderfill);
-  m_info.parameterRegistry->add({"nvclusteroverlap"}, &m_sceneConfig.clusterNvConfig.costOverlap);
-  m_info.parameterRegistry->add({"nvclusterunderfillvertices"}, &m_sceneConfig.clusterNvConfig.costUnderfillVertices);
+  m_info.parameterRegistry->add({"meshoptspatial"}, &m_sceneConfig.clusterSpatial);
+  m_info.parameterRegistry->add({"meshoptspatialfill"}, &m_sceneConfig.clusterMeshoptSpatialFill);
+  m_info.parameterRegistry->add({"meshoptflexcone"}, &m_sceneConfig.clusterMeshoptFlexCone);
+  m_info.parameterRegistry->add({"meshoptflexsplit"}, &m_sceneConfig.clusterMeshoptFlexSplit);
   m_info.parameterRegistry->add({"moclusterspatialfill"}, &m_sceneConfig.clusterMeshoptSpatialFill);
   m_info.parameterRegistry->add({"overridetime"}, &m_tweak.overrideTime);
   m_info.parameterRegistry->add({"processingthreadpct", "float percentage of threads during initial file load and processing into lod clusters, default 0.5 == 50 %"},

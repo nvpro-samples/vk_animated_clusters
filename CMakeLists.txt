@@ -21,10 +21,6 @@ download_files(FILENAMES bunny_v2.zip EXTRACT)
 #####################################################################################
 # extra libraries
 
-if(NOT TARGET nv_cluster_builder)
-  add_subdirectory(external/nv_cluster_builder)
-endif()
-
 if(NOT TARGET meshoptimizer)
   add_subdirectory(external/meshoptimizer)
 endif()
@@ -50,7 +46,6 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   nvpro2::nvutils
   nvpro2::nvvk
   nvpro2::nvvkglsl
-  nv_cluster_builder
   meshoptimizer
   cgltf
 )
