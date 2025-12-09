@@ -1,4 +1,6 @@
 # Changelog for vk_animated_clusters
+* 2025-12-9:
+  * Removed meshoptimizer as submodule, it is now part of nvpro_core2 
 * 2025-11-11:
   * Removed deprecated `nv_cluster_builder` library
   * Replace triangle stripification with `meshopt_optimizeMeshlet` and always run it
