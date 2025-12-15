@@ -61,6 +61,7 @@ AnimatedClusters::AnimatedClusters(const Info& info)
   m_frameConfig.frameConstants.facetShading           = 1;
   m_frameConfig.frameConstants.doShadow               = 1;
   m_frameConfig.frameConstants.ambientOcclusionRadius = 0.1f;
+  m_frameConfig.frameConstants.lightMixer             = 0.5f;
 }
 
 bool AnimatedClusters::initScene(const std::filesystem::path& filePath)
