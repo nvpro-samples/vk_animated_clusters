@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,12 +13,13 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
 #define VMA_IMPLEMENTATION
 
+#include <nvvk/validation_settings.hpp>
 #include <nvapp/elem_logger.hpp>
 #include <nvapp/elem_profiler.hpp>
 #include <nvapp/elem_camera.hpp>
@@ -66,11 +67,13 @@ int main(int argc, char** argv)
 
   nvutils::ProfilerManager                    profilerManager;
   std::shared_ptr<nvutils::CameraManipulator> cameraManipulator = std::make_shared<nvutils::CameraManipulator>();
+  nvvk::ValidationSettings::LayerPresets      validationPreset  = nvvk::ValidationSettings::LayerPresets::eStandard;
 
   nvutils::ParameterRegistry parameterRegistry;
   nvutils::ParameterParser   parameterParser;
 
   parameterRegistry.add({"validation"}, &vkSetup.enableValidationLayers);
+  parameterRegistry.add({"validationpreset"}, (int*)&validationPreset);
   parameterRegistry.add({"vsync"}, &appInfo.vSync);
   parameterRegistry.add({"device", "force a vulkan device via index into the device list"}, &vkSetup.forceGPU);
 
@@ -82,6 +85,19 @@ int main(int argc, char** argv)
 
   parameterParser.add(parameterRegistry);
   parameterParser.parse(argc, argv);
+
+  nvvk::ValidationSettings validationSettings;
+  if(vkSetup.enableValidationLayers)
+  {
+    validationSettings.setPreset(validationPreset);
+    validationSettings.duplicate_message_limit = 3;
+    // some false positives
+    validationSettings.message_id_filter = {"VUID-RuntimeSpirv-storageInputOutput16-06334", "VUID-VkShaderModuleCreateInfo-pCode-08740",
+                                            "VUID-vkCmdBuildClusterAccelerationStructureIndirectNV-pCommandInfos-12307",
+                                            "VUID-vkCmdBuildClusterAccelerationStructureIndirectNV-dstImplicitData-12303"};
+
+    vkSetup.instanceCreateInfoExt = validationSettings.buildPNextChain();
+  }
 
   nvvk::addSurfaceExtensions(vkSetup.instanceExtensions);
   nvvk::Context vkContext;
