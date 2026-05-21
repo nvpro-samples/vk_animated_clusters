@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
@@ -153,7 +153,7 @@ public:
   void setSupportsClusters(bool supported) { m_resources.m_supportsClusters = supported; }
 
 private:
-  VkExtent2D                 m_windowSize;
+  VkExtent2D                 m_windowSize{};
   Info                       m_info;
   nvutils::ProfilerTimeline* m_profilerTimeline{};
   nvvk::ProfilerGpuTimer     m_profilerGpuTimer{};
