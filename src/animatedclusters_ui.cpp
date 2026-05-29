@@ -91,11 +91,9 @@ void uiPlot(std::string plotName, std::string tooltipFormat, const std::vector<T
     ImPlot::SetupAxes(nullptr, "Count", axesFlags, axesFlags);
     ImPlot::SetupAxesLimits(0, static_cast<double>(data.size()), 0, static_cast<double>(maxValue), ImPlotCond_Always);
 
-    ImPlot::PushStyleVar(ImPlotStyleVar_FillAlpha, 0.25f);
     ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
-    ImPlot::SetNextFillStyle(plotColor);
-    ImPlot::PlotShaded("", data.data(), (int)data.size(), -INFINITY, 1.0, 0.0, 0, 0);
-    ImPlot::PopStyleVar();
+    ImPlot::PlotShaded("", data.data(), (int)data.size(), -INFINITY, 1.0, 0.0,
+                       ImPlotSpec(ImPlotProp_FillColor, (ImU32)plotColor, ImPlotProp_FillAlpha, 0.25f));
 
     if(ImPlot::IsPlotHovered())
     {
