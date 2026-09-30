@@ -657,7 +657,7 @@ void RendererRayTraceClusters::initRayTracingTemplates(Resources& res, Scene& sc
 
       tempBbox.bbox = clusterBbox;
 
-      templateInfo = {0};
+      templateInfo = {};
 
       templateInfo.clusterID     = c;
       templateInfo.vertexCount   = cluster.numVertices;
@@ -822,12 +822,9 @@ void RendererRayTraceClusters::initRayTracingTemplates(Resources& res, Scene& sc
       const shaderio::Cluster&                                cluster           = geometry.clusters[c];
       VkClusterAccelerationStructureInstantiateClusterInfoNV& instantiationInfo = instantiationInfosMapping[c];
 
-      instantiationInfo.clusterIdOffset        = 0;
+      instantiationInfo = {};
+      // leave everything default / no vertices,  we are looking for the worst case instantiation size
       instantiationInfo.clusterTemplateAddress = geometryTemplate.templateAddresses[c];
-      instantiationInfo.geometryIndexOffset    = 0;
-      // leave vertices off given we are looking for worst case instantiation size, not actual
-      instantiationInfo.vertexBuffer.startAddress  = 0;
-      instantiationInfo.vertexBuffer.strideInBytes = 0;
     }
 
     // query size of instantiations
@@ -966,7 +963,12 @@ void RendererRayTraceClusters::initRayTracingTemplateInstantiations(Resources& r
       // input
       VkClusterAccelerationStructureInstantiateClusterInfoNV& instInfo = instantiationInfos[clusterOffset + c];
 
-      instInfo.clusterIdOffset        = 0;  // stored in template
+      instInfo = {};
+
+      // no need for an offset, use value from template
+      instInfo.clusterIdOffset     = 0;
+      instInfo.geometryIndexOffset = 0;
+
       instInfo.clusterTemplateAddress = geometryTemplate.templateAddresses[c];
 
       if(scene.m_config.clusterDedicatedVertices)
