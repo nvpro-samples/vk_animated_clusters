@@ -280,16 +280,16 @@ void AnimatedClusters::onUIRender()
     ImGui::BeginDisabled(!m_tweak.useTemplates);
     PE::Checkbox("Use implicit template build", &m_tweak.useImplicitTemplates);
     PE::entry("Template build mode",
-              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID", &m_tweak.templateBuildMode); });
+              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID1", &m_tweak.templateBuildMode); });
     PE::entry("Template instantiate mode",
-              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID", &m_tweak.templateInstantiateMode); });
+              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID2", &m_tweak.templateInstantiateMode); });
     PE::SliderFloat("Template bbox bloat percentage", &m_tweak.templateBboxBloat, -0.001f, 1.0f, "%.3f", 0,
                     "Negative values disable passing template bbox");
     ImGui::EndDisabled();
 
     ImGui::BeginDisabled(m_tweak.useTemplates);
     PE::entry("CLAS build mode",
-              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID", &m_tweak.clusterBuildMode); });
+              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID3", &m_tweak.clusterBuildMode); });
     ImGui::EndDisabled();
 
     PE::InputIntClamped("Position truncation bits", (int*)&m_tweak.clusterPositionTruncationBits, 0, 22, 1, 1,
