@@ -1,0 +1,9 @@
+# A fly-through around the default scene, one frame per path step, so the views are the same on every run.
+# The camera path is added once, then every sequence plays it again with another configuration.
+
+SEQUENCE "raster_clusters_path"      --sequenceframes 12 --sequenceresetframes 0 --renderer 1 --animation 1 --addcamerapath "smooth 1 loop 0 dur 10 ; {2.3, 3.5, 2.5}, {-0.34, 1.2, -0.03}, {0, 1, 0}, {60} ; {-2.5, 3.0, 2.5}, {-0.34, 1.2, -0.03}, {0, 1, 0}, {60} ; {-2.5, 2.0, -2.5}, {-0.34, 1.2, -0.03}, {0, 1, 0}, {70} ; {2.5, 3.0, -2.5}, {-0.34, 1.2, -0.03}, {0, 1, 0}, {60}" --runcamerapath 0 12
+SEQUENCE "raster_triangles_path"     --renderer 0 --runcamerapath 0 12
+SEQUENCE "raytrace_triangles_path"   --renderer 2 --runcamerapath 0 12
+SEQUENCE "raytrace_clusters_path"    --renderer 3 --runcamerapath 0 12
+SEQUENCE "raytrace_clusters_static_path" --animation 0 --runcamerapath 0 12
+SEQUENCE "raster_clusters_static_path"   --renderer 1 --runcamerapath 0 12

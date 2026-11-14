@@ -1,0 +1,9 @@
+# Cluster ray tracing: explicit and implicit templates, or dedicated cluster builds.
+
+SEQUENCE "templates"                  --sequenceframes 8 --sequenceresetframes 2 --renderer 3 --autosettings 0 --animation 1 --templates 1 --implicittemplates 0
+SEQUENCE "implicit_templates"         --implicittemplates 1
+SEQUENCE "no_templates"               --templates 0 --implicittemplates 0
+SEQUENCE "no_templates_static"        --animation 0
+SEQUENCE "templates_static"           --templates 1
+SEQUENCE "implicit_templates_static"  --implicittemplates 1
+SEQUENCE "templates_animated_again"   --animation 1 --implicittemplates 0

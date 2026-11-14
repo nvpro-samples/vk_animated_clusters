@@ -1,0 +1,21 @@
+# Rasterization with ambient occlusion, which depends on the reversed-Z depth buffer,
+# crossed with the render resolution, including the fixed ones that are not a multiple of the window.
+
+SEQUENCE "raster_hbao"                    --sequenceframes 8 --sequenceresetframes 2 --renderer 1 --supersample 1 --hbao 1 --hbaoblur 1
+SEQUENCE "raster_hbao_noblur"             --hbaoblur 0
+SEQUENCE "raster_hbao_large_radius"       --hbaoblur 1 --hbaoradius 0.2
+SEQUENCE "raster_hbao_small_radius"       --hbaoradius 0.005
+SEQUENCE "raster_nohbao"                  --hbao 0
+SEQUENCE "raster_hbao_supersample2"       --hbao 1 --hbaoradius 0.05 --supersample 2
+SEQUENCE "raster_hbao_noblur_supersample" --hbaoblur 0
+SEQUENCE "raster_triangles_hbao"          --renderer 0 --hbaoblur 1
+SEQUENCE "raster_triangles_hbao_ss1"      --supersample 1
+SEQUENCE "raytrace_supersample2"          --renderer 3 --supersample 2
+SEQUENCE "raytrace_supersample1"          --supersample 1
+SEQUENCE "raster_fixed_540p"              --renderer 1 --supersample 540
+SEQUENCE "raster_fixed_1080p"             --supersample 1080
+SEQUENCE "raster_fixed_square_1024"       --supersample 1024
+SEQUENCE "raster_triangles_fixed_720p"    --renderer 0 --supersample 720
+SEQUENCE "raytrace_fixed_720p"            --renderer 3 --supersample 720
+SEQUENCE "raytrace_fixed_square_1024"     --supersample 1024
+SEQUENCE "raytrace_back_to_window_size"   --supersample 1

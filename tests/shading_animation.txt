@@ -1,0 +1,35 @@
+# Shading and visualization per renderer, ray traced shadow and ambient occlusion, the animation
+# deformers, time override, draw toggles, and one sequence with all numeric values at their extremes.
+
+SEQUENCE "raster_triangles_visualize0"      --sequenceframes 8 --sequenceresetframes 2 --renderer 0 --animation 1 --visualize 0 --colorxor 0 --facetshading 1 --shadow 1 --aorays 2 --ripple 1 --twist 1
+SEQUENCE "raster_triangles_visualize1"      --visualize 1
+SEQUENCE "raster_triangles_visualize2"      --visualize 2
+SEQUENCE "raster_clusters_visualize0"       --renderer 1 --visualize 0
+SEQUENCE "raster_clusters_visualize1"       --renderer 1 --visualize 1
+SEQUENCE "raster_clusters_visualize2"       --renderer 1 --visualize 2
+SEQUENCE "raytrace_triangles_visualize0"    --renderer 2 --visualize 0
+SEQUENCE "raytrace_triangles_visualize1"    --renderer 2 --visualize 1
+SEQUENCE "raytrace_triangles_visualize2"    --renderer 2 --visualize 2
+SEQUENCE "raytrace_clusters_visualize0"     --renderer 3 --visualize 0
+SEQUENCE "raytrace_clusters_visualize1"     --renderer 3 --visualize 1
+SEQUENCE "raytrace_clusters_visualize2"     --renderer 3 --visualize 2
+SEQUENCE "raytrace_clusters_facet_off"      --visualize 0 --facetshading 0
+SEQUENCE "raster_clusters_facet_off"        --renderer 1
+SEQUENCE "raytrace_clusters_noshadow_noao"  --renderer 3 --facetshading 1 --shadow 0 --aorays 0
+SEQUENCE "raytrace_clusters_shadow"         --shadow 1
+SEQUENCE "raytrace_clusters_ao"             --shadow 0 --aorays 2
+SEQUENCE "raytrace_clusters_shadow_ao"      --shadow 1
+SEQUENCE "raytrace_triangles_shadow_ao"     --renderer 2
+SEQUENCE "deformers_off"                    --renderer 3 --ripple 0 --twist 0
+SEQUENCE "ripple_only"                      --ripple 1
+SEQUENCE "twist_only"                       --ripple 0 --twist 1
+SEQUENCE "ripple_twist"                     --ripple 1
+SEQUENCE "ripple_twist_raster_clusters"     --renderer 1
+SEQUENCE "ripple_twist_raytrace_triangles"  --renderer 2
+SEQUENCE "ripple_twist_static"              --renderer 3 --animation 0
+SEQUENCE "override_time"                    --animation 1 --overridetime 3.5
+SEQUENCE "override_time_off"                --overridetime 0
+SEQUENCE "cluster_boxes"                    --renderer 1 --clusterboxes 1
+SEQUENCE "cluster_boxes_only"               --drawobjects 0
+SEQUENCE "extreme_values"                   --clusterboxes 0 --drawobjects 1 --renderer 3 --lightmixer 1 --colorxor 12345 --ripplefrequency 200 --rippleamplitude 0.05 --ripplespeed 10 --twistangle 1440 --twistspeed 2 --aorays 64 --aoradius 1 --fixedtimestep 0.25
+SEQUENCE "extreme_values_raster"            --renderer 1 --hbaointensity 3 --hbaopower 8 --hbaobias 0.5

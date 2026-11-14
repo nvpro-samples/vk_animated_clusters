@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 uint murmurHash(uint idx)
 {
@@ -91,7 +77,8 @@ vec4 shading(uint instanceID, vec3 wPos, vec3 wNormal, uint clusterID, float ove
 
 uint64_t packPickingValue(uint32_t v, float z)
 {
-  z         = 1.f - clamp(z, 0.f, 1.f);
+  // reversed-Z, the nearest has the highest value
+  z         = clamp(z, 0.f, 1.f);
   uint bits = floatBitsToUint(z);
   bits ^= (int(bits) >> 31) | 0x80000000u;
   uint64_t value = (uint64_t(bits) << 32) | uint64_t(v);

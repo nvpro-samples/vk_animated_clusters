@@ -1,0 +1,29 @@
+# Acceleration structure build modes (0 default, 1 fast build, 2 fast trace) per stage, templates,
+# animation, TLAS rebuild, position truncation and template bbox bloat.
+# The "build flags" log line shows what was applied; the first sequence turns off the automatic
+# settings, the last two turn them on and expect trace modes without templates, then build modes with.
+
+SEQUENCE "templates_mode0"                  --sequenceframes 8 --sequenceresetframes 2 --renderer 3 --autosettings 0 --animation 1 --templates 1 --implicittemplates 0 --templatebuildmode 0 --templateinstantiatemode 0 --blasbuildmode 0
+SEQUENCE "templates_mode1"                  --templatebuildmode 1 --templateinstantiatemode 1 --blasbuildmode 1
+SEQUENCE "templates_mode2"                  --templatebuildmode 2 --templateinstantiatemode 2 --blasbuildmode 2
+SEQUENCE "implicit_templates_mode1"         --implicittemplates 1 --templatebuildmode 1 --templateinstantiatemode 1 --blasbuildmode 1
+SEQUENCE "implicit_templates_mode2"         --templatebuildmode 2 --templateinstantiatemode 2 --blasbuildmode 2
+SEQUENCE "no_templates_cluster0"            --implicittemplates 0 --templates 0 --clusterbuildmode 0
+SEQUENCE "no_templates_cluster1"            --implicittemplates 0 --templates 0 --clusterbuildmode 1
+SEQUENCE "no_templates_cluster2"            --implicittemplates 0 --templates 0 --clusterbuildmode 2
+SEQUENCE "no_templates_static"              --animation 0 --clusterbuildmode 2 --blasbuildmode 2
+SEQUENCE "templates_static"                 --templates 1 --templatebuildmode 1 --templateinstantiatemode 1 --blasbuildmode 1
+SEQUENCE "triangles_blas0"                  --renderer 2 --animation 1 --blasbuildmode 0
+SEQUENCE "triangles_blas1"                  --renderer 2 --animation 1 --blasbuildmode 1
+SEQUENCE "triangles_blas2"                  --renderer 2 --animation 1 --blasbuildmode 2
+SEQUENCE "triangles_static_blas2"           --animation 0 --blasbuildmode 2
+SEQUENCE "triangles_rebuild_fraction_0"     --animation 1 --blasrebuildfraction 0
+SEQUENCE "triangles_rebuild_fraction_1"     --blasrebuildfraction 1
+SEQUENCE "triangles_tlas_rebuild"           --tlasrebuild 1
+SEQUENCE "clusters_tlas_rebuild"            --renderer 3
+SEQUENCE "truncate_bits_templates"          --tlasrebuild 0 --templates 1 --implicittemplates 0 --positiontruncatebits 22
+SEQUENCE "truncate_bits_no_templates"       --templates 0 --positiontruncatebits 22
+SEQUENCE "bbox_bloat_min"                   --templates 1 --positiontruncatebits 0 --templatebboxbloat -0.001
+SEQUENCE "bbox_bloat_max"                   --templatebboxbloat 1
+SEQUENCE "auto_settings_static"             --autosettings 1 --renderer 3 --animation 0
+SEQUENCE "auto_settings_animated"           --animation 1

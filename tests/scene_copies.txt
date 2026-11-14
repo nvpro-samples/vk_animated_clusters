@@ -1,0 +1,9 @@
+# Scene instancing, which scales the cluster, template and BLAS counts.
+
+SEQUENCE "raytrace_clusters_1"   --sequenceframes 8 --sequenceresetframes 2 --renderer 3 --animation 1 --gridcopies 1
+SEQUENCE "raytrace_clusters_4"   --gridcopies 4
+SEQUENCE "raytrace_clusters_16"  --gridcopies 16
+SEQUENCE "raytrace_triangles_16" --renderer 2
+SEQUENCE "raster_clusters_16"    --renderer 1
+SEQUENCE "raster_triangles_16"   --renderer 0
+SEQUENCE "raster_triangles_1"    --gridcopies 1

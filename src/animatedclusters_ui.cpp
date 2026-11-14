@@ -1,23 +1,13 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
+#include <chrono>
 #include <filesystem>
+
+#include <fmt/chrono.h>
+#include <nvutils/file_operations.hpp>
 
 #include <imgui/imgui.h>
 #include <imgui/imgui_internal.h>
@@ -108,12 +98,233 @@ void uiPlot(std::string plotName, std::string tooltipFormat, const std::vector<T
   }
 }
 
-void AnimatedClusters::viewportUI(ImVec2 corner)
+void AnimatedClusters::viewportUI(ImVec2 corner, ImVec2 imageSize)
 {
   ImVec2     mouseAbsPos = ImGui::GetMousePos();
   glm::uvec2 mousePos    = {mouseAbsPos.x - corner.x, mouseAbsPos.y - corner.y};
 
-  m_frameConfig.frameConstants.mousePosition = mousePos * glm::uvec2(m_tweak.supersample, m_tweak.supersample);
+  // the viewport shows the render target scaled to the displayed rect, fixed resolutions are letterboxed
+  const Resources::FrameBuffer& fb = m_resources.m_frameBuffer;
+  glm::vec2  displaySize = fb.fixedSize ? glm::vec2(std::max(imageSize.x, 1.0f), std::max(imageSize.y, 1.0f)) :
+                                          glm::vec2(std::max(fb.windowSize.width, 1u), std::max(fb.windowSize.height, 1u));
+  glm::vec2  scale       = glm::vec2(fb.renderSize.width, fb.renderSize.height) / displaySize;
+  glm::uvec2 maxPos      = {std::max(fb.renderSize.width, 1u) - 1, std::max(fb.renderSize.height, 1u) - 1};
+
+  m_frameConfig.frameConstants.mousePosition = glm::min(glm::uvec2(glm::vec2(mousePos) * scale), maxPos);
+}
+
+void AnimatedClusters::cameraPathUI()
+{
+  namespace PE = nvgui::PropertyEditor;
+
+  // File: Save / Load the per-scene paths file stored next to the executable
+  const std::filesystem::path pathsFile = sceneCameraPathsFile(m_sceneFilePath);
+  ImGui::TextUnformatted("File:");
+  ImGui::SameLine();
+  ImGui::BeginDisabled(pathsFile.empty());
+  if(ImGui::SmallButton("Save"))
+  {
+    if(saveCameraPaths(pathsFile, m_cameraPaths))
+      LOGI("Saved %zu camera path(s) to %s\n", m_cameraPaths.size(), nvutils::utf8FromPath(pathsFile).c_str());
+    else
+      LOGE("Could not write camera paths to %s\n", nvutils::utf8FromPath(pathsFile).c_str());
+  }
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Load") && loadCameraPaths(pathsFile, m_cameraPaths))
+  {
+    // the scene's file replaced the paths, later scene loads use it again
+    m_cameraPathsExternal = false;
+    m_cameraPathActive = m_cameraPaths.empty() ? -1 : std::min(std::max(m_cameraPathActive, 0), int(m_cameraPaths.size()) - 1);
+    m_cameraPathEditKey  = -1;
+    m_cameraPathPlayback = CAMERA_PATH_STOP;
+  }
+  ImGui::EndDisabled();
+  if(pathsFile.empty())
+    ImGui::TextDisabled("(load a scene to save/load its paths file)");
+  else
+    ImGui::TextDisabled("%s", nvutils::utf8FromPath(pathsFile.filename()).c_str());
+
+  ImGui::Spacing();
+
+  // Path: New / Delete / Copy / Paste (Copy/Paste exchange the path string via the clipboard)
+  ImGui::TextUnformatted("Path:");
+  ImGui::SameLine();
+  if(ImGui::SmallButton("New##path"))
+  {
+    m_cameraPaths.emplace_back();
+    m_cameraPathActive   = int(m_cameraPaths.size()) - 1;
+    m_cameraPathEditKey  = -1;
+    m_cameraPathPlayback = CAMERA_PATH_STOP;
+  }
+  ImGui::SameLine();
+  ImGui::BeginDisabled(m_cameraPathActive < 0 || m_cameraPathActive >= int(m_cameraPaths.size()));
+  if(ImGui::SmallButton("Delete##path"))
+  {
+    m_cameraPaths.erase(m_cameraPaths.begin() + m_cameraPathActive);
+    m_cameraPathActive   = m_cameraPaths.empty() ? -1 : std::min(m_cameraPathActive, int(m_cameraPaths.size()) - 1);
+    m_cameraPathEditKey  = -1;
+    m_cameraPathPlayback = CAMERA_PATH_STOP;
+  }
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Copy") && m_cameraPathActive >= 0 && m_cameraPathActive < int(m_cameraPaths.size()))
+    ImGui::SetClipboardText(m_cameraPaths[m_cameraPathActive].getString().c_str());
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Paste"))
+  {
+    const char* clip = ImGui::GetClipboardText();
+    CameraPath  pasted;
+    if(clip && pasted.setFromString(clip))
+    {
+      m_cameraPaths.push_back(std::move(pasted));
+      m_cameraPathActive   = int(m_cameraPaths.size()) - 1;
+      m_cameraPathEditKey  = -1;
+      m_cameraPathPlayback = CAMERA_PATH_STOP;
+    }
+  }
+
+  // active path selector
+  {
+    std::string preview = (m_cameraPathActive >= 0 && m_cameraPathActive < int(m_cameraPaths.size())) ?
+                              fmt::format("Path {} ({} keys)", m_cameraPathActive, m_cameraPaths[m_cameraPathActive].size()) :
+                              std::string("<none>");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if(ImGui::BeginCombo("##camerapathsel", preview.c_str()))
+    {
+      for(int i = 0; i < int(m_cameraPaths.size()); i++)
+      {
+        if(ImGui::Selectable(fmt::format("Path {} ({} keys)", i, m_cameraPaths[i].size()).c_str(), i == m_cameraPathActive))
+        {
+          m_cameraPathActive   = i;
+          m_cameraPathEditKey  = -1;
+          m_cameraPathPlayback = CAMERA_PATH_STOP;
+          m_cameraPathU        = 0.0;
+        }
+      }
+      ImGui::EndCombo();
+    }
+  }
+
+  const bool hasPath = m_cameraPathActive >= 0 && m_cameraPathActive < int(m_cameraPaths.size());
+  const nvutils::CameraManipulator::Camera& cam = m_info.cameraManipulator->getCamera();
+
+  // Key: New / Update / Delete (captured from the current camera)
+  ImGui::TextUnformatted("Key:");
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!hasPath);
+  if(ImGui::SmallButton("New##key") && hasPath)
+  {
+    CameraPath& keyPath = m_cameraPaths[m_cameraPathActive];
+    int insertAt = (m_cameraPathEditKey >= 0 && m_cameraPathEditKey < int(keyPath.keys.size())) ? m_cameraPathEditKey + 1 :
+                                                                                                  int(keyPath.keys.size());
+    keyPath.keys.insert(keyPath.keys.begin() + insertAt, CameraPathKey{cam.eye, cam.ctr, cam.up, cam.fov});
+    m_cameraPathEditKey = insertAt;
+  }
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Update##key") && hasPath && m_cameraPathEditKey >= 0
+     && m_cameraPathEditKey < int(m_cameraPaths[m_cameraPathActive].keys.size()))
+  {
+    m_cameraPaths[m_cameraPathActive].keys[m_cameraPathEditKey] = CameraPathKey{cam.eye, cam.ctr, cam.up, cam.fov};
+  }
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Delete##key") && hasPath && m_cameraPathEditKey >= 0
+     && m_cameraPathEditKey < int(m_cameraPaths[m_cameraPathActive].keys.size()))
+  {
+    CameraPath& keyPath = m_cameraPaths[m_cameraPathActive];
+    keyPath.keys.erase(keyPath.keys.begin() + m_cameraPathEditKey);
+    m_cameraPathEditKey = std::min(m_cameraPathEditKey, int(keyPath.keys.size()) - 1);
+  }
+  ImGui::EndDisabled();
+
+  // keyframe list (always shown, even when empty; selecting previews the camera)
+  if(ImGui::BeginListBox("##keys", ImVec2(-FLT_MIN, ImGui::GetTextLineHeightWithSpacing() * 4.5f)))
+  {
+    if(hasPath)
+    {
+      const CameraPath& selPath = m_cameraPaths[m_cameraPathActive];
+      for(int i = 0; i < int(selPath.keys.size()); i++)
+      {
+        const CameraPathKey& k = selPath.keys[i];
+        if(ImGui::Selectable(
+               fmt::format("{:2d}: eye {:.1f} {:.1f} {:.1f}  fov {:.0f}", i, k.eye.x, k.eye.y, k.eye.z, k.fov).c_str(),
+               i == m_cameraPathEditKey))
+        {
+          m_cameraPathEditKey                  = i;
+          m_cameraPathPlayback                 = CAMERA_PATH_STOP;
+          nvutils::CameraManipulator::Camera c = cam;
+          c.eye = k.eye, c.ctr = k.ctr, c.up = k.up, c.fov = k.fov;
+          m_info.cameraManipulator->setCamera(c, false);  // animate for a nicer preview
+        }
+      }
+    }
+    ImGui::EndListBox();
+  }
+
+  if(!hasPath)
+    return;
+
+  CameraPath& path = m_cameraPaths[m_cameraPathActive];
+
+  PE::begin("camerapath", ImGuiTableFlags_Resizable);
+  PE::Checkbox("Smooth", &path.smooth, "Catmull-Rom interpolation, otherwise piecewise linear");
+  PE::Checkbox("Loop", &path.loop, "Real-time playback wraps around");
+  {
+    float dur = float(path.duration);
+    if(PE::InputFloat("Duration (s)", &dur, 0.1f, 1.0f, "%.2f", 0, "Seconds for a full real-time playback"))
+      path.duration = std::max(double(dur), 0.0);
+  }
+  PE::end();
+
+  // real-time playback + scrub
+  const bool active = m_cameraPathPlayback != CAMERA_PATH_STOP;
+  if(ImGui::Button(active ? "Stop" : "Play"))
+  {
+    if(active)
+    {
+      m_cameraPathPlayback = CAMERA_PATH_STOP;
+    }
+    else
+    {
+      m_cameraPathPlayback = CAMERA_PATH_REALTIME;
+      m_cameraPathStarted  = false;
+      if(m_cameraPathU >= 1.0)
+        m_cameraPathU = 0.0;
+    }
+  }
+  ImGui::SameLine();
+  if(ImGui::Button("Restart"))
+  {
+    m_cameraPathU       = 0.0;
+    m_cameraPathStarted = false;
+  }
+  ImGui::SameLine();
+  {
+    float u = float(m_cameraPathU);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if(ImGui::SliderFloat("##scrub", &u, 0.0f, 1.0f, "t = %.3f"))
+    {
+      m_cameraPathU        = u;
+      m_cameraPathPlayback = CAMERA_PATH_STOP;
+      applyCameraPathSample(m_cameraPathU);
+    }
+  }
+
+  // deterministic (fixed-step) playback, same behaviour as --runcamerapath
+  PE::begin("camerapathfixed", ImGuiTableFlags_Resizable);
+  PE::InputInt("Fixed frames", &m_cameraPathFrames, 1, 16, 0,
+               "Number of frames for a full fixed-step (deterministic) traversal, as used by --runcamerapath");
+  PE::end();
+  m_cameraPathFrames = std::max(m_cameraPathFrames, 1);
+  if(ImGui::Button("Run fixed"))
+  {
+    m_cameraPathFrame    = 0;
+    m_cameraPathPlayback = CAMERA_PATH_FIXED;
+  }
+  ImGui::SameLine();
+  if(m_cameraPathPlayback == CAMERA_PATH_FIXED)
+    ImGui::Text("frame %d / %d", m_cameraPathFrame, m_cameraPathFrames);
+  else
+    ImGui::TextDisabled("cmd: --runcamerapath %d %d", m_cameraPathActive, m_cameraPathFrames);
 }
 
 void AnimatedClusters::onUIRender()
@@ -132,6 +343,15 @@ void AnimatedClusters::onUIRender()
       {
         m_requestCameraRecenter = true;
       }
+
+      bool screenShotJpg = ImGui::IsKeyChordPressed(ImGuiKey_F12);
+      bool screenShotPng = ImGui::IsKeyChordPressed(ImGuiMod_Shift | ImGuiKey_F12);
+      if(screenShotJpg || screenShotPng)
+      {
+        auto        now      = std::chrono::system_clock::now();
+        std::string filename = fmt::format("screenshot_{:%Y_%m_%d_%H_%M_%S}.{}", now, screenShotJpg ? "jpg" : "png");
+        saveScreenshot(SCREENSHOT_VIEWPORT, filename, screenShotJpg ? 90 : 100);
+      }
     }
   }
 
@@ -149,8 +369,8 @@ void AnimatedClusters::onUIRender()
   if(m_requestCameraRecenter && isPickingValid(readback))
   {
 
-    glm::uvec2 mousePos = {m_frameConfig.frameConstants.mousePosition.x / m_tweak.supersample,
-                           m_frameConfig.frameConstants.mousePosition.y / m_tweak.supersample};
+    // picking works in render target pixels
+    glm::uvec2 mousePos = m_frameConfig.frameConstants.mousePosition;
 
     const glm::mat4 view = m_info.cameraManipulator->getViewMatrix();
     const glm::mat4 proj = m_frameConfig.frameConstants.projMatrix;
@@ -159,9 +379,8 @@ void AnimatedClusters::onUIRender()
 
     if(d < 1.0F)  // Ignore infinite
     {
-      glm::vec4       win_norm = {0, 0, m_frameConfig.frameConstants.viewport.x / m_tweak.supersample,
-                                  m_frameConfig.frameConstants.viewport.y / m_tweak.supersample};
-      const glm::vec3 hitPos   = glm::unProjectZO({mousePos.x, mousePos.y, d}, view, proj, win_norm);
+      glm::vec4 win_norm     = {0, 0, m_frameConfig.frameConstants.viewport.x, m_frameConfig.frameConstants.viewport.y};
+      const glm::vec3 hitPos = glm::unProjectZO({mousePos.x, mousePos.y, d}, view, proj, win_norm);
 
       // Set the interest position
       glm::dvec3 eye, center, up;
@@ -203,13 +422,15 @@ void AnimatedClusters::onUIRender()
     PE::entry("Super sampling", [&]() { return m_ui.enumCombobox(GUI_SUPERSAMPLE, "sampling", &m_tweak.supersample); });
 
     bool isRayTracing = m_tweak.renderer == RENDERER_RAYTRACE_CLUSTERS || m_tweak.renderer == RENDERER_RAYTRACE_TRIANGLES;
-    if(isRayTracing && m_tweak.supersample > 1)
+    const bool isScaled = m_resources.m_frameBuffer.renderSize.width != m_resources.m_frameBuffer.windowSize.width
+                          || m_resources.m_frameBuffer.renderSize.height != m_resources.m_frameBuffer.windowSize.height;
+    if(isRayTracing && isScaled)
     {
       ImGui::PushStyleColor(ImGuiCol_Text, warnColor);
     }
     PE::Text("Render Resolution",
              fmt::format("{} x {}", m_resources.m_frameBuffer.renderSize.width, m_resources.m_frameBuffer.renderSize.height));
-    if(isRayTracing && m_tweak.supersample > 1)
+    if(isRayTracing && isScaled)
     {
       ImGui::PopStyleColor();
     }
@@ -227,9 +448,10 @@ void AnimatedClusters::onUIRender()
       PE::Checkbox("Ambient occlusion (HBAO)", &m_tweak.hbaoActive);
       if(PE::treeNode("HBAO settings"))
       {
-        PE::Checkbox("Full resolution", &m_tweak.hbaoFullRes);
         PE::InputFloat("Radius", &m_tweak.hbaoRadius, 0.01f);
-        PE::InputFloat("Blur sharpness", &m_frameConfig.hbaoSettings.blurSharpness, 1.0f);
+        PE::Checkbox("Blur", &m_frameConfig.hbaoSettings.blur);
+        PE::Checkbox("Quarter resolution", &m_tweak.hbaoQuarter, "Half width and height, upsampled depth-aware");
+        PE::InputFloat("Power", &m_frameConfig.hbaoSettings.powerExponent, 1.0f);
         PE::InputFloat("Intensity", &m_frameConfig.hbaoSettings.intensity, 0.1f);
         PE::InputFloat("Bias", &m_frameConfig.hbaoSettings.bias, 0.01f);
         PE::treePop();
@@ -302,13 +524,7 @@ void AnimatedClusters::onUIRender()
   if(ImGui::CollapsingHeader("Animation", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
     PE::begin("##Animation");
-    if(PE::Checkbox("Enable animation", &m_rendererConfig.doAnimation))
-    {
-      m_tweak.blasBuildMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
-      m_tweak.templateInstantiateMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
-      m_tweak.clusterBuildMode = m_rendererConfig.doAnimation ? BuildMode::BUILD_FAST_BUILD : BuildMode::BUILD_FAST_TRACE;
-      m_tweak.useTemplates = m_rendererConfig.doAnimation;
-    }
+    PE::Checkbox("Enable animation", &m_rendererConfig.doAnimation);
 
     ImGui::BeginDisabled(!m_rendererConfig.doAnimation);
     PE::SliderFloat("Override time value", &m_tweak.overrideTime, 0, 10.0f, "%0.3f", 0, "Set to 0 disables override");
@@ -462,18 +678,30 @@ void AnimatedClusters::onUIRender()
   {
     nvgui::CameraWidget(m_info.cameraManipulator);
   }
+  if(ImGui::CollapsingHeader("Camera Paths", nullptr))
+  {
+    cameraPathUI();
+  }
+
+  if(ImGui::CollapsingHeader("Misc", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
+  {
+    PE::begin("##MiscSettings");
+    PE::Checkbox("Auto settings", &m_autoSettings,
+                 "On animation changes, sets the build modes and template usage that suit the animation state");
+    PE::end();
+  }
 
   if(ImGui::CollapsingHeader("Lighting and Shading", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
     namespace PE = nvgui::PropertyEditor;
 
-    PE::begin();
+    PE::begin("##Lighting");
     PE::SliderFloat("Light Mixer", &m_frameConfig.frameConstants.lightMixer, 0.0f, 1.0f, "%.3f", 0,
                     "Mix between flashlight and sun light");
     PE::end();
 
     ImGui::TextDisabled("Sun & Sky");
-    nvgui::skySimpleParametersUI(m_frameConfig.frameConstants.skyParams);
+    nvgui::skySimpleParametersUI(m_frameConfig.frameConstants.skyParams, "##Sky");
   }
 
   ImGui::End();
@@ -521,9 +749,22 @@ void AnimatedClusters::onUIRender()
 
   // Rendered image displayed fully in 'Viewport' window
   ImGui::Begin("Viewport");
-  ImVec2 corner = ImGui::GetCursorScreenPos();  // Corner of the viewport
-  ImGui::Image((ImTextureID)m_imguiTexture, ImGui::GetContentRegionAvail());
-  viewportUI(corner);
+  ImVec2 avail     = ImGui::GetContentRegionAvail();
+  ImVec2 imageSize = avail;
+  ImVec2 corner    = ImGui::GetCursorScreenPos();  // Corner of the viewport
+
+  const Resources::FrameBuffer& fb = m_resources.m_frameBuffer;
+  if(fb.fixedSize && fb.renderSize.width && fb.renderSize.height)
+  {
+    // fixed resolution: fit its aspect into the viewport, centered
+    float scale = std::min(avail.x / float(fb.renderSize.width), avail.y / float(fb.renderSize.height));
+    imageSize   = {float(fb.renderSize.width) * scale, float(fb.renderSize.height) * scale};
+    corner.x += std::max(0.0f, (avail.x - imageSize.x) * 0.5f);
+    corner.y += std::max(0.0f, (avail.y - imageSize.y) * 0.5f);
+    ImGui::SetCursorScreenPos(corner);
+  }
+  ImGui::Image((ImTextureID)m_imguiTexture, imageSize);
+  viewportUI(corner, imageSize);
   ImGui::End();
 }
 

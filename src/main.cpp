@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #define VMA_IMPLEMENTATION
 
@@ -26,6 +12,8 @@
 #include <nvapp/elem_default_menu.hpp>
 #include <nvapp/elem_default_title.hpp>
 #include <nvutils/parameter_parser.hpp>
+#include <nvutils/parameter_sequencer.hpp>
+#include <nvapp/elem_sequencer.hpp>
 
 #include "animatedclusters.hpp"
 
@@ -69,13 +57,24 @@ int main(int argc, char** argv)
   std::shared_ptr<nvutils::CameraManipulator> cameraManipulator = std::make_shared<nvutils::CameraManipulator>();
   nvvk::ValidationSettings::LayerPresets      validationPreset  = nvvk::ValidationSettings::LayerPresets::eStandard;
 
-  nvutils::ParameterRegistry parameterRegistry;
-  nvutils::ParameterParser   parameterParser;
+  nvutils::ParameterRegistry            parameterRegistry;
+  nvutils::ParameterParser              parameterParser;
+  nvutils::ParameterSequencer::InitInfo sequencerInfo{// sequencer always requires a parser and registry
+                                                      .parameterParser   = &parameterParser,
+                                                      .parameterRegistry = &parameterRegistry,
+                                                      // sequencer uses the profiler for benchmarking
+                                                      .profilerManager = &profilerManager};
 
   parameterRegistry.add({"validation"}, &vkSetup.enableValidationLayers);
   parameterRegistry.add({"validationpreset"}, (int*)&validationPreset);
   parameterRegistry.add({"vsync"}, &appInfo.vSync);
   parameterRegistry.add({"device", "force a vulkan device via index into the device list"}, &vkSetup.forceGPU);
+  parameterRegistry.add({"headless", "run without a window"}, &appInfo.headless, true);
+  parameterRegistry.add({"headlessframes", "frames to render in headless mode. default 1"}, &appInfo.headlessFrameCount);
+  parameterRegistry.add({"headlessfps", "frame rate limit in headless mode, idles the GPU between frames. 0 unlimited (default)"},
+                        &appInfo.headlessFps);
+  parameterRegistry.addVector({"windowsize", "window size, or the viewport when headless: width height. default 0 0 picks one"},
+                              &appInfo.windowSize);
 
   AnimatedClusters::Info sampleInfo;
   sampleInfo.cameraManipulator                    = cameraManipulator;
@@ -83,8 +82,18 @@ int main(int argc, char** argv)
   sampleInfo.parameterRegistry                    = &parameterRegistry;
   std::shared_ptr<AnimatedClusters> sampleElement = std::make_shared<AnimatedClusters>(sampleInfo);
 
+  // add a few more parameters to registry and parser to handle sequencer settings
+  sequencerInfo.registerScriptParameters(parameterRegistry, parameterParser);
+
+  // takes a screenshot at the end of each sequence
+  sequencerInfo.postCallbacks.emplace_back(
+      [&](const nvutils::ParameterSequencer::State& state) { sampleElement->parameterSequenceCallback(state); });
+
   parameterParser.add(parameterRegistry);
   parameterParser.parse(argc, argv);
+
+  // this element requires sequencerInfo that is potentially updated by parameterParser
+  auto elemSequencer = std::make_shared<nvapp::ElementSequencer>(sequencerInfo);
 
   nvvk::ValidationSettings validationSettings;
   if(vkSetup.enableValidationLayers)
@@ -94,7 +103,11 @@ int main(int argc, char** argv)
     // some false positives
     validationSettings.message_id_filter = {"VUID-RuntimeSpirv-storageInputOutput16-06334", "VUID-VkShaderModuleCreateInfo-pCode-08740",
                                             "VUID-vkCmdBuildClusterAccelerationStructureIndirectNV-pCommandInfos-12307",
-                                            "VUID-vkCmdBuildClusterAccelerationStructureIndirectNV-dstImplicitData-12303"};
+                                            "VUID-vkCmdBuildClusterAccelerationStructureIndirectNV-dstImplicitData-12303",
+                                            // layer reads the opInput union as triangle input for move objects
+                                            "VUID-VkClusterAccelerationStructureTriangleClusterInputNV-sType-sType",
+                                            "VUID-VkClusterAccelerationStructureTriangleClusterInputNV-vertexFormat-10439",
+                                            "VUID-VkClusterAccelerationStructureTriangleClusterInputNV-maxClusterVertexCount-10441"};
 
     vkSetup.instanceCreateInfoExt = validationSettings.buildPNextChain();
   }
@@ -151,6 +164,7 @@ int main(int argc, char** argv)
   app.addElement(sampleElement);
   app.addElement(std::make_shared<nvapp::ElementCamera>(cameraManipulator));
   app.addElement(std::make_shared<nvapp::ElementProfiler>(&profilerManager));
+  app.addElement(elemSequencer);
   app.run();
 
   nvutils::Logger::getInstance().setLogCallback(nullptr);

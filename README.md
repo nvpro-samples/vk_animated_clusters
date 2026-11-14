@@ -271,6 +271,27 @@ The cmake setup will download the `Stanford Bunny` glTF 2.0 model that serves as
 It will also look for [`nvpro_core2`](https://github.com/nvpro-samples/nvpro_core2) either as subdirectory of the current project directory, or up to two levels above. If it is not found, it will automatically download the git repo into `/build/_deps`.
 Note, that the repository of `nvpro_core2` needs to be updated manually in case the sample is updated manually, as version mismatches could occur over time.
 
+### Camera Path
+
+A camera path is a keyframed fly-through that can be authored in the UI (_Misc Settings → Camera Paths_) and provided on the command line.
+`--runcamerapath <index> <framecount>` spreads a path across exactly that many rendered frames, which makes sequences and benchmarks repeatable,
+see [docs/camera_paths.md](docs/camera_paths.md).
+
+### Headless and Testing
+
+The sample can run without a window via `--headless` and it can walk a list of configurations on
+its own via `--sequencefile` or `--sequencestring`, writing a screenshot per sequence with `--sequencescreenshot 2`.
+
+``` bash
+vk_animated_clusters --headless --headlessframes 40 --sequencescreenshot 2 --sequencestring "SEQUENCE \"raster\" --sequenceframes 8 --renderer 1 SEQUENCE \"raytrace\" --renderer 3"
+```
+
+We use this for a set of tests over the renderers and cluster configurations, see [tests/README.md](tests/README.md).
+
+``` bash
+python tests/run_tests.py
+```
+
 ## Further Samples about NVIDIA RTX Mega Geometry
 
 Other Vulkan samples using the new extensions are:

@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -23,10 +9,12 @@
 #include <nvapp/application.hpp>
 #include <nvutils/camera_manipulator.hpp>
 #include <nvutils/parameter_registry.hpp>
+#include <nvutils/parameter_sequencer.hpp>
 #include <nvvk/context.hpp>
 #include <nvvk/profiler_vk.hpp>
 #include <nvgui/enum_registry.hpp>
 
+#include "camera_path.hpp"
 #include "renderer.hpp"
 
 
@@ -77,6 +65,13 @@ public:
     TLAS_UPDATE_REBUILD
   };
 
+  enum ScreenshotMode
+  {
+    SCREENSHOT_OFF,
+    SCREENSHOT_WINDOW,
+    SCREENSHOT_VIEWPORT
+  };
+
   enum GuiEnums
   {
     GUI_RENDERER,
@@ -93,10 +88,10 @@ public:
 
     RendererType renderer    = RENDERER_RAYTRACE_CLUSTERS;
     int          supersample = 2;
+    bool         hbaoQuarter = true;
 
-    bool  hbaoFullRes = false;
-    bool  hbaoActive  = true;
-    float hbaoRadius  = 0.05f;
+    bool  hbaoActive = true;
+    float hbaoRadius = 0.05f;
 
     float     overrideTime                  = 0.0f;
     bool      facetShading                  = true;
@@ -149,10 +144,22 @@ public:
   void onRender(VkCommandBuffer cmd) override;
   void onResize(VkCommandBuffer cmd, const VkExtent2D& size) override;
   void onFileDrop(const std::filesystem::path& filename) override;
+  void onLastHeadlessFrame() override;
+
+  void parameterSequenceCallback(const nvutils::ParameterSequencer::State& state);
 
   void setSupportsClusters(bool supported) { m_resources.m_supportsClusters = supported; }
 
 private:
+  void applyAutoSettings();              // animation dependent build modes and templates
+  void registerCameraPathParameters();   // `--addcamerapath`, `--loadcamerapaths`, `--runcamerapath`
+  void updateCameraPath(double time);    // drive the manipulator during playback (called from onRender)
+  bool applyCameraPathSample(double u);  // sample active path at `u` and set the camera; false if unavailable
+  void cameraPathUI();
+  std::filesystem::path sceneCameraPathsFile(const std::filesystem::path& scenePath) const;
+
+  void saveScreenshot(ScreenshotMode mode, const std::string& filename, int quality = 100);
+
   VkExtent2D                 m_windowSize{};
   Info                       m_info;
   nvutils::ProfilerTimeline* m_profilerTimeline{};
@@ -170,6 +177,31 @@ private:
   VkSampler                 m_imguiSampler{};
   nvgui::EnumRegistry       m_ui;
   nvutils::PerformanceTimer m_clock;
+
+  ScreenshotMode m_sequenceScreenshotMode  = SCREENSHOT_OFF;
+  ScreenshotMode m_screenshotMode          = SCREENSHOT_VIEWPORT;
+  float          m_fixedTimeStep           = -1.0f;  // negative picks the default of the run mode
+  int            m_screenshotFrameInterval = 0;      // save a screenshot every n frames, 0 disables
+  std::string    m_screenshotTimeStamp;              // session startup time, keeps screenshots of multiple runs apart
+
+  enum CameraPathPlayback
+  {
+    CAMERA_PATH_STOP,      // not playing
+    CAMERA_PATH_REALTIME,  // advance by wall-clock time over `duration` seconds
+    CAMERA_PATH_FIXED,     // advance one keyframe-step per rendered frame (deterministic)
+  };
+
+  std::vector<CameraPath> m_cameraPaths;          // path definitions, index == order added
+  bool                    m_autoSettings = true;  // derive build modes and templates from the animation state
+
+  bool m_cameraPathsExternal = false;  // paths set via --addcamerapath/--loadcamerapaths, take precedence over per-scene files
+  int                m_cameraPathActive   = -1;
+  CameraPathPlayback m_cameraPathPlayback = CAMERA_PATH_STOP;
+  bool               m_cameraPathStarted  = false;  // real-time: first frame has zero delta
+  double             m_cameraPathU        = 0.0;    // normalized playback position [0,1]
+  int                m_cameraPathFrames   = 128;    // fixed: total frames for a full traversal
+  int                m_cameraPathFrame    = 0;      // fixed: current frame
+  int                m_cameraPathEditKey  = -1;     // UI: selected keyframe
 
   bool   m_reloadShaders         = false;
   bool   m_requestCameraRecenter = false;
@@ -207,7 +239,7 @@ private:
   float decodePickingDepth(const shaderio::Readback& readback);
   bool  isPickingValid(const shaderio::Readback& readback);
 
-  void viewportUI(ImVec2 corner);
+  void viewportUI(ImVec2 corner, ImVec2 imageSize);
 
   template <typename T>
   bool sceneChanged(const T& val) const

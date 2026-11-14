@@ -1,0 +1,16 @@
+# Every cluster size, on the renderers that consume the clusters directly.
+
+SEQUENCE "raster_64t_64v"       --sequenceframes 8 --sequenceresetframes 2 --renderer 1 --clusterconfig 0
+SEQUENCE "raster_64t_128v"      --clusterconfig 1
+SEQUENCE "raster_64t_192v"      --clusterconfig 2
+SEQUENCE "raster_96t_96v"       --clusterconfig 3
+SEQUENCE "raster_128t_128v"     --clusterconfig 4
+SEQUENCE "raster_128t_256v"     --clusterconfig 5
+SEQUENCE "raster_256t_256v"     --clusterconfig 6
+SEQUENCE "raytrace_256t_256v"   --renderer 3
+SEQUENCE "raytrace_128t_256v"   --clusterconfig 5
+SEQUENCE "raytrace_128t_128v"   --clusterconfig 4
+SEQUENCE "raytrace_96t_96v"     --clusterconfig 3
+SEQUENCE "raytrace_64t_192v"    --clusterconfig 2
+SEQUENCE "raytrace_64t_128v"    --clusterconfig 1
+SEQUENCE "raytrace_64t_64v"     --clusterconfig 0

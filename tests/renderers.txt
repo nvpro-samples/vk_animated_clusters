@@ -1,0 +1,11 @@
+# All four renderers, with and without animation, switching back and forth to also
+# cover the renderer re-initialization.
+
+SEQUENCE "raster_triangles"           --sequenceframes 8 --sequenceresetframes 2 --renderer 0 --animation 1
+SEQUENCE "raster_clusters"            --renderer 1
+SEQUENCE "raytrace_triangles"         --renderer 2
+SEQUENCE "raytrace_clusters"          --renderer 3
+SEQUENCE "raytrace_clusters_static"   --animation 0
+SEQUENCE "raytrace_triangles_static"  --renderer 2
+SEQUENCE "raster_clusters_static"     --renderer 1
+SEQUENCE "raster_triangles_animated"  --renderer 0 --animation 1

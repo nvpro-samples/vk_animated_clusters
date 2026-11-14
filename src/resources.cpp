@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <nvutils/file_operations.hpp>
 #include <nvutils/logger.hpp>
@@ -35,14 +21,10 @@ void Resources::blitFrame(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::P
 {
   auto sec = profiler.cmdFrameSection(cmd, "Post-process");
 
-  bool doHbao = frame.hbaoActive;
-
   // do hbao on the full-res input image
-  if(frame.hbaoActive && (m_hbaoFullRes || !m_frameBuffer.useResolved))
+  if(frame.hbaoActive)
   {
     cmdHBAO(cmd, frame, profiler);
-
-    doHbao = false;
   }
 
   if(m_frameBuffer.useResolved)
@@ -65,11 +47,6 @@ void Resources::blitFrame(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::P
 
     vkCmdBlitImage(cmd, m_frameBuffer.imgColor.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    m_frameBuffer.imgColorResolved.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
-
-    if(doHbao)
-    {
-      cmdHBAO(cmd, frame, profiler);
-    }
 
     cmdImageTransition(cmd, m_frameBuffer.imgColorResolved, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
   }
@@ -190,8 +167,27 @@ void Resources::deinit()
   m_allocator.deinit();
 }
 
-bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, bool hbaoFullRes)
+bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, bool hbaoQuarterRes)
 {
+  // only the HBAO resolution changed, its images are the only thing that follows it
+  if(m_frameBuffer.imgColor.image != 0 && windowSize.width == m_frameBuffer.windowSize.width
+     && windowSize.height == m_frameBuffer.windowSize.height && supersample == m_frameBuffer.supersample
+     && hbaoQuarterRes != m_frameBuffer.hbaoQuarterRes)
+  {
+    m_frameBuffer.hbaoQuarterRes = hbaoQuarterRes;
+    if(m_hbaoFrame.slot != ~0u)
+    {
+      NVVK_CHECK(vkDeviceWaitIdle(m_device));
+      HbaoPass::FrameConfig config = m_hbaoFrame.config;
+      config.quarterRes            = hbaoQuarterRes;
+
+      VkCommandBuffer cmd = createTempCmdBuffer();
+      m_hbaoPass.initFrame(m_hbaoFrame, config, cmd);
+      tempSyncSubmit(cmd);
+    }
+    return true;
+  }
+
   m_fboChangeID++;
 
   if(m_frameBuffer.imgColor.image != 0)
@@ -199,18 +195,64 @@ bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, b
     deinitFramebuffer();
   }
 
-  m_basicGraphicsState.rasterizationState.lineWidth = float(supersample);
+  // the line width is relative to this size
+  VkExtent2D referenceSize = windowSize;
+  bool       fixedSize     = true;  // all but the default case
+
+  switch(supersample)
+  {
+    case 540:
+      m_frameBuffer.renderSize = {960, 540};
+      break;
+    case 720:
+      m_frameBuffer.renderSize = {1280, 720};
+      break;
+    case 1080:
+      m_frameBuffer.renderSize = {1920, 1080};
+      break;
+    case 1440:
+      m_frameBuffer.renderSize = {2560, 1440};
+      break;
+    case 2160:
+      m_frameBuffer.renderSize = {3840, 2160};
+      break;
+    case 1024:
+      m_frameBuffer.renderSize = {1024, 1024};
+      break;
+    case 2048:
+      m_frameBuffer.renderSize = {2048, 2048};
+      break;
+    case 4096:
+      m_frameBuffer.renderSize = {4096, 4096};
+      break;
+    default:
+      fixedSize                = false;
+      supersample              = std::clamp(supersample, 1, FrameBuffer::MAX_SUPERSAMPLE);
+      m_frameBuffer.renderSize = {windowSize.width * supersample, windowSize.height * supersample};
+      break;
+  }
+  if(supersample > FrameBuffer::MAX_SUPERSAMPLE)
+  {
+    referenceSize = m_frameBuffer.renderSize;
+  }
+
+  m_frameBuffer.pixelScale = std::max(float(m_frameBuffer.renderSize.width) / float(referenceSize.width),
+                                      float(m_frameBuffer.renderSize.height) / float(referenceSize.height));
+  m_basicGraphicsState.rasterizationState.lineWidth = m_frameBuffer.pixelScale;
+  // reversed-Z
+  m_basicGraphicsState.depthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER;
 
   bool oldResolved = m_frameBuffer.supersample > 1;
 
-  m_frameBuffer.renderSize.width  = windowSize.width * supersample;
-  m_frameBuffer.renderSize.height = windowSize.height * supersample;
-  m_frameBuffer.supersample       = supersample;
-  m_hbaoFullRes                   = hbaoFullRes;
+  m_frameBuffer.windowSize     = windowSize;
+  m_frameBuffer.supersample    = supersample;
+  m_frameBuffer.hbaoQuarterRes = hbaoQuarterRes;
+  m_frameBuffer.fixedSize      = fixedSize;
 
   LOGI("framebuffer: %d x %d\n", m_frameBuffer.renderSize.width, m_frameBuffer.renderSize.height);
 
-  m_frameBuffer.useResolved = supersample > 1;
+  // fixed resolutions are displayed and saved as is, the window downscale is left to the viewport
+  m_frameBuffer.useResolved = supersample > 1 && !fixedSize;
 
   VkSampleCountFlagBits samplesUsed = VK_SAMPLE_COUNT_1_BIT;
   {
@@ -333,18 +375,14 @@ bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, b
     VkCommandBuffer cmd = createTempCmdBuffer();
     {
       HbaoPass::FrameConfig config;
-      config.blend                   = true;
-      config.sourceHeightScale       = m_hbaoFullRes ? 1 : supersample;
-      config.sourceWidthScale        = m_hbaoFullRes ? 1 : supersample;
-      config.targetWidth             = m_hbaoFullRes ? m_frameBuffer.renderSize.width : windowSize.width;
-      config.targetHeight            = m_hbaoFullRes ? m_frameBuffer.renderSize.height : windowSize.height;
+      config.targetWidth             = m_frameBuffer.renderSize.width;
+      config.targetHeight            = m_frameBuffer.renderSize.height;
+      config.quarterRes              = m_frameBuffer.hbaoQuarterRes;
       config.sourceDepth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       config.sourceDepth.imageView   = m_frameBuffer.viewDepth;
       config.sourceDepth.sampler     = VK_NULL_HANDLE;
       config.targetColor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-      config.targetColor.imageView   = m_frameBuffer.useResolved && !m_hbaoFullRes ?
-                                           m_frameBuffer.imgColorResolved.descriptor.imageView :
-                                           m_frameBuffer.imgColor.descriptor.imageView;
+      config.targetColor.imageView   = m_frameBuffer.imgColor.descriptor.imageView;
       config.targetColor.sampler     = VK_NULL_HANDLE;
 
       m_hbaoPass.initFrame(m_hbaoFrame, config, cmd);
@@ -409,17 +447,17 @@ void Resources::cmdHBAO(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::Pro
 {
   auto timerSection = profiler.cmdFrameSection(cmd, "HBAO");
 
-  bool useResolved = m_frameBuffer.useResolved && !m_hbaoFullRes;
-
   // transition color to general
-  cmdImageTransition(cmd, useResolved ? m_frameBuffer.imgColorResolved : m_frameBuffer.imgColor,
-                     VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+  cmdImageTransition(cmd, m_frameBuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
 
   // transition depth read optimal
   cmdImageTransition(cmd, m_frameBuffer.imgDepthStencil, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
   m_hbaoPass.cmdCompute(cmd, m_hbaoFrame, frame.hbaoSettings);
+
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                         VK_ACCESS_2_SHADER_WRITE_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
 }
 
 bool Resources::compileShader(shaderc::SpvCompilationResult& compiled,
@@ -486,7 +524,7 @@ void Resources::tempSyncSubmit(VkCommandBuffer cmd)
 void Resources::cmdBeginRendering(VkCommandBuffer cmd, bool hasSecondary, VkAttachmentLoadOp loadOpColor, VkAttachmentLoadOp loadOpDepth)
 {
   VkClearValue colorClear{.color = {m_bgColor.x, m_bgColor.y, m_bgColor.z, m_bgColor.w}};
-  VkClearValue depthClear{.depthStencil = {1.0F, 0}};
+  VkClearValue depthClear{.depthStencil = {0.0F, 0}};
 
   cmdImageTransition(cmd, m_frameBuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
   cmdImageTransition(cmd, m_frameBuffer.imgDepthStencil, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
