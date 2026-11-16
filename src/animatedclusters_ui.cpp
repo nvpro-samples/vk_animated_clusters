@@ -475,7 +475,7 @@ void AnimatedClusters::onUIRender()
   {
     PE::begin("##Clusters");
     PE::entry("Cluster/meshlet size",
-              [&]() { return m_ui.enumCombobox(GUI_MESHLET, "##HiddenID", &m_tweak.clusterConfig); });
+              [&]() { return m_ui.enumCombobox(GUI_MESHLET, "##ClusterSize", &m_tweak.clusterConfig); });
     PE::Checkbox("Use spatial (RT)", &m_sceneConfig.clusterSpatial, "uses spatial builder, otherwise flex builder");
     ImGui::BeginDisabled(!m_sceneConfig.clusterSpatial);
     PE::InputFloat("Spatial fill weight", &m_sceneConfig.clusterMeshoptSpatialFill, 0.01f, 0.01f, "%.3f",
@@ -502,16 +502,17 @@ void AnimatedClusters::onUIRender()
     ImGui::BeginDisabled(!m_tweak.useTemplates);
     PE::Checkbox("Use implicit template build", &m_tweak.useImplicitTemplates);
     PE::entry("Template build mode",
-              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID", &m_tweak.templateBuildMode); });
-    PE::entry("Template instantiate mode",
-              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID", &m_tweak.templateInstantiateMode); });
+              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##TemplateBuildMode", &m_tweak.templateBuildMode); });
+    PE::entry("Template instantiate mode", [&]() {
+      return m_ui.enumCombobox(GUI_BUILDMODE, "##TemplateInstantiateMode", &m_tweak.templateInstantiateMode);
+    });
     PE::SliderFloat("Template bbox bloat percentage", &m_tweak.templateBboxBloat, -0.001f, 1.0f, "%.3f", 0,
                     "Negative values disable passing template bbox");
     ImGui::EndDisabled();
 
     ImGui::BeginDisabled(m_tweak.useTemplates);
     PE::entry("CLAS build mode",
-              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID", &m_tweak.clusterBuildMode); });
+              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##ClasBuildMode", &m_tweak.clusterBuildMode); });
     ImGui::EndDisabled();
 
     PE::InputIntClamped("Position truncation bits", (int*)&m_tweak.clusterPositionTruncationBits, 0, 22, 1, 1,
@@ -555,7 +556,7 @@ void AnimatedClusters::onUIRender()
                          || (m_tweak.renderer != RENDERER_RAYTRACE_TRIANGLES && m_tweak.renderer != RENDERER_RAYTRACE_CLUSTERS));
 
     TLASUpdateMode updateMode = m_frameConfig.forceTlasFullRebuild ? TLAS_UPDATE_REBUILD : TLAS_UPDATE_REFIT;
-    PE::entry("TLAS update", [&]() { return m_ui.enumCombobox(GUI_TLAS_UPDATEMODE, "##HiddenID", &updateMode); });
+    PE::entry("TLAS update", [&]() { return m_ui.enumCombobox(GUI_TLAS_UPDATEMODE, "##TlasUpdate", &updateMode); });
     m_frameConfig.forceTlasFullRebuild = (updateMode == TLAS_UPDATE_REBUILD);
 
     ImGui::EndDisabled();
@@ -565,7 +566,8 @@ void AnimatedClusters::onUIRender()
     PE::Text("BLAS rebuilds per frame", "%d", int32_t(m_frameConfig.blasRebuildFraction * m_tweak.gridCopies));
     m_frameConfig.blasRebuildFraction = int32_t(m_frameConfig.blasRebuildFraction * m_tweak.gridCopies) / float(m_tweak.gridCopies);
     ImGui::EndDisabled();
-    PE::entry("BLAS buildmode", [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##hiddenID", &m_tweak.blasBuildMode); });
+    PE::entry("BLAS buildmode",
+              [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##BlasBuildMode", &m_tweak.blasBuildMode); });
     PE::end();
   }
 
